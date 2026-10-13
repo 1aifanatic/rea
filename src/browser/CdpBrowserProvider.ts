@@ -167,6 +167,8 @@ export class CdpBrowserProvider implements BrowserObservationPort {
         ),
       );
     } catch (cause: unknown) {
+      if (options.signal?.aborted === true)
+        return err(new AnalysisCancelledError("analyze_web_bundle", { cause }));
       return err(providerError(cause, "analyze_web_bundle"));
     }
   }
