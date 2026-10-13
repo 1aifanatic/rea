@@ -21,7 +21,7 @@ const waitFor = async (ready: () => boolean, description: string) => {
   }
 };
 
-describe("CdpBrowserProvider: cancellation and session events", () => {
+describe("CdpBrowserProvider: cancellation during cleanup", () => {
   it("reports cancellation when an interrupt arrives during page cleanup", async () => {
     const browser = await startFakeCdpBrowser({
       hangOnMethod: "Network.disable",
@@ -111,7 +111,9 @@ describe("CdpBrowserProvider: cancellation and session events", () => {
       },
     });
   });
+});
 
+describe("CdpBrowserProvider: cancellation and session events", () => {
   it("honors cancellation during the final progress callback before publishing inspection", async () => {
     const browser = await startFakeCdpBrowser();
     trackBrowser(browser);
