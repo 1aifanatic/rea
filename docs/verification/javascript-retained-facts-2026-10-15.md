@@ -210,17 +210,17 @@ also mixed true missing original content with unavailable processing phases.
 The API itself preserves node/observation pairs; these are qualified agent
 composition outcomes, not a claim of product provenance corruption.
 
-Final source validation passed: full `npm run check`, generated metadata/docs
+Pre-integration V2 source validation passed: full `npm run check`, generated metadata/docs
 checks, five documentation consistency cases, test discovery, and 18 MCP cases
 (two expanded facts cases plus 16 SDK schema/presentation cases). Together with
 the unchanged 83 domain/application/MCP cases passed on V2, this establishes
 101 distinct focused cases across six files. The final combined gate took
 182.620 s wall / 182.170929 s CPU / 4,288,471,040 B peak cgroup memory, with no
-OOM and verified cleanup. Exact command and receipts are in JSON. The final
+OOM and verified cleanup. Exact command and receipts are in JSON. That pre-integration
 runtime tree matches the V2 agent-trial runtime tree exactly; formatting and
-added validation did not change the built backend.
+added validation did not change that built backend.
 
-## All completed scripted workflows
+## All pre-integration scripted workflows
 
 Each row uses a fresh MCP process; warm samples reuse its retained parent or export.
 The first-answer wall clock includes input hashing/catalog/preparation; CPU and memory
@@ -259,3 +259,37 @@ and TODO checks passed; final runner/grader syntax and all three historical
 harness reconstructions were verified against their recorded SHA-256 values.
 No tech-debt markers were introduced. These final audit receipts are retained
 separately from backend task performance.
+
+## Current-main integration
+
+The measured V2 checkpoint is
+`d32547f9ac7769049a8ee6fbc8a27abcb2285a54`. Main advanced during the trials;
+merge `5f0b1fa47ffdf25b3775d87c2e07aea6cff26f31` integrates pinned current main
+`2202e3f0ba556d40cc6e598df1ecbdf1eda56c13`, including independent semantic
+value/lifecycle fixes. Historical cohorts remain valid for their pinned backend,
+not measurements of the later integrated backend. Integrated normal/interruption
+export/view controls and the complete focused/static/docs gates are recorded
+separately below and in JSON when executed. No agent pilot rerun or universal
+token/latency benefit is inferred from that source update.
+
+Integrated checks passed: all **101 focused cases in six files**, full static
+checks, generated docs/metadata, five consistency cases and test discovery.
+The combined gate took **247.955 s wall / 247.425940 s CPU / 4,303,970,304 B**
+peak cgroup memory; no OOM and verified cleanup.
+
+| Integrated run            | First retrieval ms |             Warm ms | First-answer wall s | CPU s at answer | Peak B at answer | Structured selected / full-catalog BPE |
+| ------------------------- | -----------------: | ------------------: | ------------------: | --------------: | ---------------: | -------------------------------------: |
+| integrated-export-control |           3231.861 | 1224.159 / 1155.725 |              45.631 |       45.728169 |    1,959,448,576 |                        8,936 / 188,813 |
+| integrated-view-control   |            148.705 |     45.964 / 37.995 |              41.674 |       41.896616 |    1,527,902,208 |                       17,393 / 190,058 |
+| integrated-export-timeout |           2503.346 | 1159.864 / 1232.282 |              41.260 |       41.350087 |    1,963,479,040 |                        6,341 / 186,218 |
+| integrated-view-timeout   |            138.893 |     53.395 / 35.014 |              37.307 |       37.530088 |    1,483,386,880 |                       14,707 / 187,372 |
+
+All four integrated controls passed their independent export oracle; both view
+cases passed exact complete CLI/MCP Evidence parity. Normal/timeout selected
+facts and source coverage also match the V2 checkpoints. Temporary export paths
+can change a few request BPE tokens; exact requests are measured, not normalized.
+The new runtime contains 1,633 JS files, tree SHA-256
+`6a5763452c1522a782e531e6dda227ea10140f9f9d52148fc1602a6ecf3cea5a`
+under the explicit compact sorted path/hash algorithm in JSON. Agent-trial
+runtime pins remain separate. These controls do not justify a causal speedup
+or whole-agent token claim.
