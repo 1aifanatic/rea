@@ -99,7 +99,13 @@ function handleDisconnect() {
 function handleSignal(signal) {
   if (shutdownSignal !== undefined) return;
   shutdownSignal = signal;
-  if (child === undefined || process.platform === "win32") return;
+  if (child === undefined) return;
+  if (process.platform === "win32") {
+    // Windows has no process-group ownership here; terminate the exact child
+    // handle acquired by this supervisor and retain SQLite until its close.
+    child.kill(signal);
+    return;
+  }
   // Establish cancellation before signalling the group. This supervisor is
   // its live leader, so the group identifier cannot be reused during cleanup.
   process.kill(-process.pid, signal);

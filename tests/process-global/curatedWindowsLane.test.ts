@@ -75,6 +75,12 @@ describe("curated Windows test lane", () => {
       "tests/boundary/process/packageNpmInvocation.test.ts",
     );
   });
+
+  it("keeps Windows runner cancellation coverage in the lane", async () => {
+    expect(await explicitPaths("windows")).toContain(
+      "tests/process-global/runnerCancellation.test.ts",
+    );
+  });
 });
 
 it("keeps every explicit focused CI test path executable after file moves", async () => {

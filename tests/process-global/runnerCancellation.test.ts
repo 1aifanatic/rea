@@ -1,10 +1,17 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
+import {
+  access,
+  copyFile,
+  mkdir,
+  readFile,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { expect, it } from "vitest";
+import { expect, it, onTestFinished } from "vitest";
 
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 
@@ -85,6 +92,74 @@ it.runIf(process.platform !== "win32")(
       await runner.closed;
       // Also clean up when this regression is run against the broken runner.
       if (descendantPid !== undefined) stopIfPresent(descendantPid);
+    }
+  },
+);
+
+it.runIf(process.platform === "win32")(
+  "terminates the owned command after supervisor IPC cancellation",
+  async () => {
+    const directory = await createTestTempDirectory("rea-runner-win-cancel-");
+    const gate = join(directory, "release-child");
+    const started = join(directory, "child-started");
+    const runner = launchSupervisor(directory, gatedCommand(gate, started));
+    onTestFinished(async () => {
+      await writeFile(gate, "release");
+      await runner.closed;
+    });
+    try {
+      await runner.ready;
+      await expect(readFile(started, "utf8")).resolves.toBe("started");
+      runner.child.send("SIGTERM");
+      await expect(
+        withTimeout(
+          runner.closeEvent,
+          "supervisor retained the child after cancellation",
+          1_000,
+        ),
+      ).resolves.toMatchObject({ code: 143 });
+      expect(await pathExists(gate)).toBe(false);
+      await expect(
+        launch(directory, 'process.stdout.write("released");').closed,
+      ).resolves.toMatchObject({ code: 0, stdout: "released" });
+    } finally {
+      await writeFile(gate, "release");
+      await runner.closed;
+    }
+  },
+);
+
+it.runIf(process.platform === "win32")(
+  "stops the owned command after the supervisor IPC disconnects",
+  async () => {
+    const directory = await createTestTempDirectory(
+      "rea-runner-win-disconnect-",
+    );
+    const gate = join(directory, "release-child");
+    const started = join(directory, "child-started");
+    const runner = launchSupervisor(directory, gatedCommand(gate, started));
+    onTestFinished(async () => {
+      await writeFile(gate, "release");
+      await runner.closed;
+    });
+    try {
+      await runner.ready;
+      await expect(readFile(started, "utf8")).resolves.toBe("started");
+      runner.child.disconnect();
+      await expect(
+        withTimeout(
+          runner.closeEvent,
+          "supervisor retained the child after disconnect",
+          1_000,
+        ),
+      ).resolves.toMatchObject({ code: 143 });
+      expect(await pathExists(gate)).toBe(false);
+      await expect(
+        launch(directory, 'process.stdout.write("released");').closed,
+      ).resolves.toMatchObject({ code: 0, stdout: "released" });
+    } finally {
+      await writeFile(gate, "release");
+      await runner.closed;
     }
   },
 );
@@ -279,6 +354,75 @@ function launch(directory: string, command: string) {
   return { child, ready, closed };
 }
 
+function launchSupervisor(directory: string, command: string) {
+  const child = spawn(
+    process.execPath,
+    [
+      fileURLToPath(
+        new URL("../../scripts/run-exclusive-command.mjs", import.meta.url),
+      ),
+      "test",
+      process.execPath,
+      "-e",
+      command,
+    ],
+    { cwd: directory, stdio: ["ignore", "pipe", "pipe", "ipc"] },
+  );
+  if (child.stdout === null || child.stderr === null)
+    throw new Error("runner supervisor streams were not piped");
+  let stdout = "";
+  let stderr = "";
+  let notifyReady: (() => void) | undefined;
+  const ready = withTimeout(
+    new Promise<void>((resolveReady) => {
+      notifyReady = resolveReady;
+    }),
+    "runner supervisor child did not start",
+  );
+  void ready.catch(() => {});
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+    if (stdout.includes("ready")) notifyReady?.();
+  });
+  child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+  const closeEvent = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    stdout: string;
+    stderr: string;
+  }>((resolveClosed, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      notifyReady?.();
+      resolveClosed({ code, signal, stdout, stderr });
+    });
+  });
+  const closed = withTimeout(closeEvent, "runner supervisor did not finish");
+  return { child, ready, closeEvent, closed };
+}
+
+function gatedCommand(gate: string, started: string): string {
+  return `
+    const fs = require("node:fs");
+    const gate = ${JSON.stringify(gate)};
+    fs.writeFileSync(${JSON.stringify(started)}, "started");
+    process.stdout.write("ready");
+    const poll = setInterval(() => {
+      if (fs.existsSync(gate)) {
+        clearInterval(poll);
+        process.exit(0);
+      }
+    }, 10);
+  `;
+}
+
+function pathExists(path: string): Promise<boolean> {
+  return access(path).then(
+    () => true,
+    () => false,
+  );
+}
+
 function execute(
   directory: string,
   command: string,
@@ -303,12 +447,16 @@ function execute(
   });
 }
 
-function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  message: string,
+  timeoutMs = 5_000,
+): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   return Promise.race([
     promise,
     new Promise<never>((_, reject) => {
-      timeout = setTimeout(() => reject(new Error(message)), 5_000);
+      timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
     }),
   ]).finally(() => clearTimeout(timeout));
 }
