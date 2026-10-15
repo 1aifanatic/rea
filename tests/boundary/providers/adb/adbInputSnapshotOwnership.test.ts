@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import {
-  copyFile,
   lstat,
-  mkdtemp,
+  open,
   readFile,
   rm,
   writeFile,
@@ -32,8 +31,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
-    copyFile: vi.fn(actual.copyFile),
-    mkdtemp: vi.fn(actual.mkdtemp),
+    open: vi.fn(actual.open),
     rm: vi.fn(actual.rm),
   };
 });
@@ -193,9 +191,19 @@ test("cancels after the input snapshot copy and before contacting the device", a
     await vi.importActual<typeof import("node:fs/promises")>(
       "node:fs/promises",
     );
-  vi.mocked(copyFile).mockImplementationOnce(async (...args) => {
-    await actualFs.copyFile(...args);
-    controller.abort();
+  vi.mocked(open).mockImplementation(async (path, ...args) => {
+    const handle = await actualFs.open(path, ...args);
+    if (
+      String(path).endsWith("payload.bin") &&
+      basename(dirname(String(path))).startsWith("rea-adb-input-")
+    ) {
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        await sync();
+        controller.abort();
+      };
+    }
+    return handle;
   });
 
   const result = await f.provider.execute(f.request, {
@@ -211,10 +219,20 @@ test("cancels after the input snapshot copy and before contacting the device", a
 
 test("reports input snapshot capacity failures before contacting the device", async () => {
   const f = await fixture();
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
   const capacityFailure = Object.assign(new Error("no space left"), {
     code: "ENOSPC",
   });
-  vi.mocked(copyFile).mockRejectedValueOnce(capacityFailure);
+  vi.mocked(open).mockImplementation(async (path, ...args) => {
+    if (
+      String(path).endsWith("payload.bin") &&
+      basename(dirname(String(path))).startsWith("rea-adb-input-")
+    ) throw capacityFailure;
+    return actualFs.open(path, ...args);
+  });
 
   const result = await f.provider.execute(f.request);
   expect(result.ok).toBe(false);

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { link, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, onTestFinished, test, vi } from "vitest";
 
@@ -23,7 +23,7 @@ vi.mock(
 );
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+  return { ...actual, link: vi.fn(actual.link) };
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -85,8 +85,8 @@ test("retains a committed screen capture receipt when cancellation arrives after
     await vi.importActual<typeof import("node:fs/promises")>(
       "node:fs/promises",
     );
-  vi.mocked(writeFile).mockImplementationOnce(async (...args) => {
-    await actualFs.writeFile(...args);
+  vi.mocked(link).mockImplementationOnce(async (...args) => {
+    await actualFs.link(...args);
     controller.abort();
   });
   const output = join(f.root, "captures");
