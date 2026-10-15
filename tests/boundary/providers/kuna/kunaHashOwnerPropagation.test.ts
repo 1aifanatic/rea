@@ -1,3 +1,6 @@
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import { afterEach, expect, it, vi } from "vitest";
 
 import { ArtifactResourceScope } from "../../../../src/artifacts/ArtifactResourceScope.js";
@@ -63,7 +66,7 @@ import { KunaTargetCommands } from "../../../../src/kuna/KunaTargetCommands.js";
 import { inspectKunaProvider } from "../../../../src/kuna/KunaDoctor.js";
 import { inspectKunaInstallationOwned } from "./kunaFileCloseOwner.js";
 import { fakeKunaCalls } from "./fakeKuna.js";
-import { session } from "./kunaSessionFixture.js";
+import { run, session } from "./kunaSessionFixture.js";
 
 it.skipIf(process.platform === "win32")(
   "retains and retries the exact Kuna executable hash owner without running Kuna",
@@ -182,5 +185,46 @@ it.skipIf(process.platform === "win32")(
     expect((await fakeKunaCalls(fixture.kuna)).map(({ argv }) => argv)).toEqual(
       [["--version"], ["--version"]],
     );
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "drains shared cache cleanup outside a retired client's target key",
+  async () => {
+    const fixture = await session("rea-kuna-session-cache-cleanup-");
+    const binary = composeBinarySession(
+      new AnalysisProviderRegistry([fixture.provider]),
+    );
+    const retired = join(fixture.cacheRoot, "trash", "retired");
+    await mkdir(retired, { recursive: true });
+    await writeFile(join(retired, "evidence"), "retained export");
+    await chmod(retired, 0o500);
+    const client = fixture.open();
+    try {
+      await run(client, "procedure_assembly", { procedure: "main" });
+      // Target-key cleanup cannot release maintenance retained for another key.
+      expect(await client.close()).toEqual({ ok: true, value: null });
+      expect(await binary.close()).toMatchObject({
+        ok: false,
+        error: { cleanupIncomplete: true, cleanupResources: [retired] },
+      });
+      expect(binary.status()).toMatchObject({
+        open: false,
+        cleanup_pending: true,
+      });
+      expect(await readFile(join(retired, "evidence"), "utf8")).toBe(
+        "retained export",
+      );
+      await chmod(retired, 0o700);
+      expect(await binary.close()).toEqual({ ok: true, value: null });
+      expect(binary.status()).toMatchObject({ cleanup_pending: false });
+      await expect(readFile(join(retired, "evidence"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await chmod(retired, 0o700).catch(() => {});
+      await client.close();
+      await binary.close();
+    }
   },
 );
