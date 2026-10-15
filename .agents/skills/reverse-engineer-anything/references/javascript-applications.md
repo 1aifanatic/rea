@@ -195,7 +195,14 @@ accept complete inline Evidence or
 `{"kind":"retained-evidence","evidence_id":"ev_<64 lowercase hex characters>"}`
 for their application input (`application`, or `left`/`right`). `inspect_analysis_view`
 uses the same retained-reference form in `source`, or portable inline Evidence,
-to project a summary, module page, or one module with its recorded observations. This notation is
+to project a summary, module page, or one module with its recorded observations.
+For exact file/native metadata or processing gaps, use
+`view: {kind: "javascript-facts", where: {paths: ["package.json"]}, property_keys: ["name", "operation", "analysis_status"], limit: 32}`.
+Rows retain canonical node/observation identity and original Evidence. Paths
+match Evidence artifact-path/source-range locations; missing properties remain
+omitted and source coverage stays separate from page exhaustion. Batch paths and
+select only needed property keys; complete Evidence remains accessible by export.
+This notation is
 a template: replace it with the actual returned ID. Versions before 4.1.0 accept only full
 inline Evidence. Use the exact ID
 returned by the producer on the same MCP connection. Resolution does not run
