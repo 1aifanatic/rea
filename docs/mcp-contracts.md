@@ -453,6 +453,15 @@ attempt and its delivery result in `details.partial_observation`, with
 Derived comparisons and reconstruction verification yield before computation
 and before publication, so cancellation cannot race with successful Evidence.
 
+Bundle recovery requires a recorded Evidence ID. Some provider errors carry
+typed raw observations in `details.partial_observation` instead of Evidence.
+Those raw observations are not recorded in the Evidence bundle. If the SDK
+suppresses the error reply after client cancellation, Evidence tools cannot
+recover them. An empty bundle does not prove that no partial work or side
+effect occurred; output receipts and cleanup observations remain distinct.
+The broader retention decision is tracked in
+[#4276](https://github.com/morluto/rea/issues/4276).
+
 `analyze_javascript_application` also yields between reconstruction phases and
 during graph/result sealing, cross-graph binding checks, Evidence JSON validation,
 and canonical hashing. Its final result validation reuses exact graphs whose
