@@ -827,6 +827,74 @@ linux(
   },
 );
 
+portableTar(
+  "lets overlapping verification and descriptor cleanup settle without re-entering publisher admission",
+  async () => {
+    const f = await fixture("arch");
+    admitFixturePublisher(f.fingerprint);
+    const verified = await f.publisher.verifyArchive(
+      "arch",
+      f.release,
+      f.archive,
+      undefined,
+      f.publicKey,
+    );
+    if (!verified.ok) throw verified.error;
+    expect(
+      await f.publisher.retainVerifiedArchive(verified.value, f.archive),
+    ).toMatchObject({ ok: true });
+
+    let reachedMetadataClose!: () => void;
+    const metadataCloseStarted = new Promise<void>((resolve) => {
+      reachedMetadataClose = resolve;
+    });
+    let releaseMetadataClose!: () => void;
+    const metadataCloseGate = new Promise<void>((resolve) => {
+      releaseMetadataClose = resolve;
+    });
+    const originalClose = OwnedFileHandle.prototype.close;
+    const close = vi
+      .spyOn(OwnedFileHandle.prototype, "close")
+      .mockImplementation(async function (this: OwnedFileHandle) {
+        const attempt = close.mock.calls.length;
+        if (attempt === 2) {
+          reachedMetadataClose();
+          await metadataCloseGate;
+        }
+        if (attempt === 3 || attempt === 4 || attempt === 5)
+          throw new Error("Fixture descriptor close temporarily unavailable");
+        return await originalClose.apply(this);
+      });
+    try {
+      const inspection = f.publisher.inspectLauncher(f.launcher);
+      await metadataCloseStarted;
+      const hashFailure = await f.publisher.hashLauncher(f.launcher).then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
+      expect(hashFailure).toMatchObject({
+        reason: "cleanup_failed",
+        cause: expect.any(AggregateError),
+      });
+      const cleanupOutcomes = (hashFailure as Error & { cause: AggregateError })
+        .cause.errors;
+      expect(cleanupOutcomes).toHaveLength(2);
+      expect(cleanupOutcomes[0]).toMatchObject({ reason: "cleanup_failed" });
+      releaseMetadataClose();
+      await expect(inspection).resolves.toMatchObject({
+        ok: true,
+        value: { source: "signed_package_cache" },
+      });
+      await expect(f.publisher.close()).resolves.toBeUndefined();
+      expect(close).toHaveBeenCalledTimes(9);
+    } finally {
+      releaseMetadataClose();
+      close.mockRestore();
+      await f.publisher.close();
+    }
+  },
+);
+
 linux(
   "preserves cleanup ownership when verification is cancelled",
   async () => {
