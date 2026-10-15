@@ -166,16 +166,21 @@ export const inspectKunaInstallation = async (
   let fingerprint: { readonly sha256: string; readonly bytes: number };
   let script: boolean;
   try {
-    fingerprint = await options.fileCloseResources.run(() =>
-      hashStableFile(executable, {
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        retainFailedClose: (owner) =>
-          options.fileCloseResources.retain(owner, executable),
-      }),
-    );
-    script = await options.fileCloseResources.run(() =>
-      startsWithShebang(executable, options.fileCloseResources),
-    );
+    ({ fingerprint, script } = await options.fileCloseResources.run(
+      async () => {
+        const fingerprint = await hashStableFile(executable, {
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+          retainFailedClose: (owner) =>
+            options.fileCloseResources.retain(owner, executable),
+        });
+        const script = await startsWithShebang(
+          executable,
+          options.fileCloseResources,
+        );
+        options.signal?.throwIfAborted();
+        return { fingerprint, script };
+      },
+    ));
   } catch (cause: unknown) {
     if (cause instanceof RegularFileCleanupFailure) throw cause;
     options.signal?.throwIfAborted();
