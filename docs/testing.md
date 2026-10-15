@@ -227,6 +227,28 @@ For atomic writes, exercise cancellation on both sides of the documented commit
 point and preserve any publication receipt. A late interruption does not prove
 that no output was published.
 
+For successful provider reports, test cancellation immediately before the report
+reaches the application workflow as well as during provider cleanup. Validate
+the report before classifying completion: a valid report must retain its Evidence
+on cancellation, and an invalid report must keep its output error. Exercise both
+the provider boundary and the shared CLI/MCP workflow; a downstream guard does
+not repair the provider's own completion contract. When callers share startup,
+cancel each waiter independently and verify that the last departure awaits owned
+cleanup while interested peers can still reach readiness. Repeat the same
+shutdown event after a cleanup failure to verify that its listener can retry.
+
+For descriptor-backed reads, inject a close failure after a successful read and
+after a primary read or cancellation failure. Verify that the exact descriptor
+remains owned, both failures survive, and a later close retries it. Include
+admission failure after opening the descriptor. If caller cancellation returns
+before an inspection settles, gate its final read or close and verify that
+session shutdown waits for the owned work and reports any retained resources.
+
+When changing an internal helper contract, check its JavaScript verifier and
+subprocess-script consumers alongside TypeScript references. Source typecheck
+does not check those calls; run their orchestration tests against the built
+modules, including the verifier's failure and cleanup paths.
+
 Representative regressions include
 [process cleanup-time SIGINT](https://github.com/morluto/rea/blob/e78455338fe2d06c4cd03d59cbf33473d754998b/tests/boundary/process/processCaptureCancellationAdapters.test.ts),
 [late authenticated cleanup](https://github.com/morluto/rea/blob/e78455338fe2d06c4cd03d59cbf33473d754998b/tests/boundary/providers/hopper/hopperClient.handshakeRecovery.test.ts),

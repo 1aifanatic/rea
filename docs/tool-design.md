@@ -103,6 +103,10 @@ providers need not expose identical state machines.
   owner's recovery instructions. CLI adapters should reuse
   [`finishAnalysisCommand`](https://github.com/morluto/rea/blob/main/src/cli/finishAnalysisCommand.ts) where its contract
   applies rather than duplicate close/finally handling.
+- Give descriptor-backed reads an owner before opening the file. A rejected
+  close must retain the exact handle and preserve any earlier failure. If an
+  abortable caller stops waiting, keep the underlying work in that owner's
+  lifetime so shutdown cannot report release before finalization settles.
 
 Exercise the applicable [lifecycle regression scenarios](testing.md#lifecycle-regressions)
 through the producing owner and affected CLI/MCP consumers.
