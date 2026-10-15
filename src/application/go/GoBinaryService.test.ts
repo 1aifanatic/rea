@@ -6,6 +6,7 @@ import {
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
 import type { GoBinary } from "../../domain/go/goBinary.js";
+import { parseEvidence } from "../../domain/evidence.js";
 import { ok } from "../../domain/result.js";
 
 const identity = {
@@ -166,11 +167,13 @@ it("honors cancellation before reading and after a completed observation", async
     { signal: controller.signal },
   );
   expect(completed.ok).toBe(false);
-  if (!completed.ok)
-    expect(completed.error).toMatchObject({
-      _tag: "AnalysisCancelledError",
-      partialObservation: { normalized_result: report },
+  if (!completed.ok) {
+    expect(completed.error).toBeInstanceOf(AnalysisCancelledError);
+    expect(parseEvidence(completed.error.partialObservation)).toMatchObject({
+      operation: "inspect_go_binary",
+      normalized_result: report,
     });
+  }
   const before = await service.inspect(
     { path: report.artifact.path },
     { signal: controller.signal },
@@ -180,24 +183,19 @@ it("honors cancellation before reading and after a completed observation", async
   expect(calls).toBe(1);
 });
 
-it("preserves a malformed report failure when cancellation races provider completion", async () => {
+it("keeps malformed provider output ahead of a late cancellation", async () => {
   const controller = new AbortController();
-  const mismatched = {
+  const malformed = {
     ...report,
     artifact: { ...report.artifact, path: "/other" },
   };
-  const service = new GoBinaryService({
+  const result = await new GoBinaryService({
     identity,
     inspect: () => {
       controller.abort();
-      return Promise.resolve(ok(mismatched));
+      return Promise.resolve(ok(malformed));
     },
-  });
-
-  expect(
-    await service.inspect(
-      { path: report.artifact.path },
-      { signal: controller.signal },
-    ),
-  ).toMatchObject({ ok: false, error: { _tag: "AnalysisOutputError" } });
+  }).inspect({ path: report.artifact.path }, { signal: controller.signal });
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error).toBeInstanceOf(AnalysisOutputError);
 });

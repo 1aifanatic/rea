@@ -15,7 +15,7 @@ import {
   type PeResourceIdentity,
 } from "../../domain/native/peResources.js";
 import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
-import { err, type Result } from "../../domain/result.js";
+import { err, ok, type Result } from "../../domain/result.js";
 import { completeProviderEvidence } from "../ProviderOperationExecution.js";
 
 /** Shared caller validation, output parsing and Evidence provenance for CLI/MCP. */

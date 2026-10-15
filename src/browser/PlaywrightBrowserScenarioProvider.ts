@@ -235,7 +235,7 @@ const runScenario = async (
   options: ExecutionOptions,
   retainCleanup: (close: () => Promise<unknown>) => void,
 ): Promise<BrowserScenarioCapture> => {
-  if (options.signal?.aborted === true)
+  if (options.signal?.aborted)
     throw new BrowserObservationError(OPERATION, "cancelled");
   const startedAt = performance.now();
   const session = await openSession(scenario, {

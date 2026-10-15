@@ -22,6 +22,7 @@ import {
 } from "../cliObservationOptions.js";
 import { runCliJavaScriptApplicationAnalysis } from "./javascriptApplicationAnalysis.js";
 import { withCommandCancellation } from "./commandCancellation.js";
+import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
 
 /** Register CLI equivalents of the Electron MCP tools. */
 export const registerElectronCommands = (
@@ -189,14 +190,19 @@ const registerElectronTargetList = (
           if (!parsed.success) return inputError("list_electron_targets");
           const { listElectronTargets } =
             await import("../application/javascript/ElectronObservationService.js");
-          const result = await listElectronTargets(
-            context.provider,
-            parsed.data,
+          return await finishAnalysisCommand(
+            () =>
+              listElectronTargets(context.provider, parsed.data, { signal }),
             {
-              signal,
+              close: async () => {
+                await context.provider.close?.();
+              },
             },
+            "rea-cdp-electron",
+            "list_electron_targets",
+            undefined,
+            signal,
           );
-          return result.ok ? result.value : cliError(result.error);
         }),
       ),
   });
@@ -226,14 +232,19 @@ const registerElectronPageInspection = (
           if (!parsed.success) return inputError("inspect_electron_page");
           const { inspectElectronPage } =
             await import("../application/javascript/ElectronObservationService.js");
-          const result = await inspectElectronPage(
-            context.provider,
-            parsed.data,
+          return await finishAnalysisCommand(
+            () =>
+              inspectElectronPage(context.provider, parsed.data, { signal }),
             {
-              signal,
+              close: async () => {
+                await context.provider.close?.();
+              },
             },
+            "rea-cdp-electron",
+            "inspect_electron_page",
+            undefined,
+            signal,
           );
-          return result.ok ? result.value : cliError(result.error);
         }),
       ),
   });

@@ -12,15 +12,15 @@ import {
 } from "../domain/analysisErrorCore.js";
 import { createAnalysisProfile } from "../domain/analysisProfile.js";
 import { createEvidence, type Evidence } from "../domain/evidence.js";
-import { completeProviderEvidence } from "./ProviderOperationExecution.js";
 import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
 import { jsonObjectSchema } from "../domain/jsonValue.js";
-import { err, type Result } from "../domain/result.js";
+import { err, ok, type Result } from "../domain/result.js";
 import {
   inspectWebNetworkCaptureInputSchema,
   captureSensitiveValues,
   webNetworkCaptureSchema,
 } from "../domain/webNetworkCapture.js";
+import { completeProviderEvidence } from "./ProviderOperationExecution.js";
 
 const OPERATION = "inspect_web_network_capture";
 
@@ -173,7 +173,11 @@ export class WebNetworkCaptureService {
           parameters,
           result: {
             ...safeValue,
-            artifact: { ...value.artifact, path: safePath, sha256: safeSha256 },
+            artifact: {
+              ...value.artifact,
+              path: safePath,
+              sha256: safeSha256,
+            },
             records,
             limitations:
               safeSha256 === null

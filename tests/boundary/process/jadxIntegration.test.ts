@@ -3,6 +3,7 @@ import { access, readFile, truncate, writeFile } from "node:fs/promises";
 import { parseBinaryTarget } from "../../../src/application/BinaryTargetResolver.js";
 import { AndroidAnalysisService } from "../../../src/application/android/AndroidAnalysisService.js";
 import { JadxProvider } from "../../../src/android/JadxProvider.js";
+import { JadxSession } from "../../../src/android/JadxSession.js";
 import { androidResultSchemas } from "../../../src/domain/android/androidAnalysis.js";
 import { snapshotAndroidEngine } from "../../../src/android/AndroidTargetSnapshot.js";
 import { hashStableFile } from "../../../src/filesystem/StableFileHash.js";
@@ -48,6 +49,55 @@ it("retains a failed input hash descriptor until provider shutdown retries it", 
     expect(launches).toHaveLength(0);
   } finally {
     close.mockRestore();
+    await provider.close();
+    await verifyCleanup(launches);
+  }
+});
+
+it("drains hash descriptors even when session shutdown fails and retains its workspace", async () => {
+  const { service, apk, provider, launches } = await setup();
+  const initial = await service.execute("inspect_android_package", {
+    path: apk,
+  });
+  if (!initial.ok) throw initial.error;
+
+  const workspace = launches[0]?.cwd;
+  if (workspace === undefined)
+    throw new Error("Expected an acquired workspace");
+  const originalClose = OwnedFileHandle.prototype.close;
+  let fileCloseCalls = 0;
+  const fileClose = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockImplementation(async function (this: OwnedFileHandle) {
+      fileCloseCalls += 1;
+      if (fileCloseCalls === 1)
+        throw new Error("fixture input hash close failure");
+      return originalClose.call(this);
+    });
+  const sessionClose = vi
+    .spyOn(JadxSession.prototype, "close")
+    .mockRejectedValueOnce(new Error("fixture session cleanup failure"));
+  try {
+    const outcome = await service.execute("inspect_android_package", {
+      path: apk,
+    });
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        cleanupIncomplete: true,
+        cleanupResources: [expect.any(String), workspace],
+      },
+    });
+    expect(fileCloseCalls).toBe(2);
+    await expect(access(workspace)).resolves.toBeUndefined();
+
+    sessionClose.mockRestore();
+    fileClose.mockRestore();
+    await provider.close();
+    await verifyCleanup(launches);
+  } finally {
+    sessionClose.mockRestore();
+    fileClose.mockRestore();
     await provider.close();
     await verifyCleanup(launches);
   }
@@ -716,12 +766,6 @@ it("retains the execution failure while cleanup is pending and resumes after cle
       ok: false,
       error: {
         cleanupIncomplete: true,
-        cause: {
-          _tag: "ProviderAdapterError",
-          diagnostics: {
-            reason: "manifest decoder rejected malformed binary XML",
-          },
-        },
         diagnostics: {
           previous_error: {
             details: {
@@ -731,6 +775,15 @@ it("retains the execution failure while cleanup is pending and resumes after cle
             },
           },
         },
+      },
+    });
+    if (outcome.ok) throw new Error("Expected cleanup failure");
+    expect(outcome.error.cause).toBeInstanceOf(AggregateError);
+    const causes = (outcome.error.cause as AggregateError).errors;
+    expect(causes[0]).toMatchObject({
+      _tag: "ProviderAdapterError",
+      diagnostics: {
+        reason: "manifest decoder rejected malformed binary XML",
       },
     });
     expect(

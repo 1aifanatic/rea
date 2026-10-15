@@ -397,9 +397,10 @@ if (verifierFailed) {
 
 if (failures > 0) {
   process.stdout.write(`\n${failures} check(s) failed\n`);
-  process.exit(1);
+  process.exitCode = 1;
+} else {
+  process.stdout.write("\nall adb device checks passed\n");
 }
-process.stdout.write("\nall adb device checks passed\n");
 
 function parseArguments(argv) {
   const parsed = { help: false, serial: null, pull: null, installApk: null };

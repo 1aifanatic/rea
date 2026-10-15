@@ -13,7 +13,7 @@ import {
   binaryLayoutSchema,
 } from "../../domain/native/binaryLayout.js";
 import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
-import { err, type Result } from "../../domain/result.js";
+import { err, ok, type Result } from "../../domain/result.js";
 import { completeProviderEvidence } from "../ProviderOperationExecution.js";
 
 const OPERATION = "inspect_binary_layout";

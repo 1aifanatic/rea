@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
@@ -35,152 +35,178 @@ afterEach(async () => {
   );
 });
 
-describe("Electron CLI parity", () => {
-  it(
-    "cancels a passive page inspection on SIGINT and releases its CDP connection",
-    async () => {
-      const root = await createTestTempDirectory("rea-electron-cancel-cli-");
-      temporary.push(root);
-      await writeFile(join(root, "index.html"), "<main>fixture</main>");
-      const browser = await startFakeCdpBrowser({
-        electronFileUrl: pathToFileURL(join(root, "index.html")).href,
-      });
-      browsers.push(browser);
-      const child = spawn(
-        process.execPath,
-        [
-          "scripts/rea.mjs",
-          "inspect-electron-page",
-          browser.endpoint,
-          "electron-page",
-          "--observation-ms",
-          "10000",
-          "--json",
-        ],
-        { cwd: process.cwd(), env: process.env, stdio: "ignore" },
+it(
+  "returns the same endpoint-scoped Electron Evidence contracts",
+  async () => {
+    const root = await createTestTempDirectory("rea-electron-cli-");
+    temporary.push(root);
+    await writeFile(join(root, "index.html"), "<script src='app.js'></script>");
+    await writeFile(join(root, "app.js"), "export const app = true;");
+    const browser = await startFakeCdpBrowser({
+      electronFileUrl: pathToFileURL(join(root, "index.html")).href,
+      commandEvents: ({ method }) =>
+        method === "Debugger.enable"
+          ? [
+              {
+                method: "Debugger.scriptParsed",
+                sessionId: "session-1",
+                params: {
+                  scriptId: "partial-script",
+                  url: pathToFileURL(join(root, "app.js")).href,
+                  executionContextId: 1,
+                },
+              },
+            ]
+          : undefined,
+    });
+    browsers.push(browser);
+    const environment = { ...process.env };
+    const listed = await runCli(
+      ["list-electron-targets", browser.endpoint, "--json"],
+      environment,
+    );
+    expect(listed).toMatchObject({
+      operation: "list_electron_targets",
+      normalized_result: {
+        targets: [{ target_id: "electron-page" }],
+      },
+    });
+    const inspected = await runCli(
+      [
+        "inspect-electron-page",
+        browser.endpoint,
+        "electron-page",
+        "--observation-ms",
+        "0",
+        "--json",
+      ],
+      environment,
+    );
+    expect(inspected).toMatchObject({
+      operation: "inspect_electron_page",
+      provider: { id: "rea-cdp-electron" },
+      normalized_result: {
+        target: { file_path: join(root, "index.html") },
+        scripts: {
+          items: [{ cdp_hash: null, length: null, is_module: null }],
+        },
+      },
+    });
+  },
+  INTEGRATION_TEST_TIMEOUT_MS,
+);
+
+// On Windows child.kill("SIGINT") terminates the process without a console signal.
+it.skipIf(process.platform === "win32")(
+  "forwards SIGINT through Electron page inspection and completes target cleanup",
+  async () => {
+    const root = await createTestTempDirectory("rea-electron-cli-cancel-");
+    temporary.push(root);
+    const page = join(root, "index.html");
+    await writeFile(page, "<main>fixture</main>");
+    const browser = await startFakeCdpBrowser({
+      electronFileUrl: pathToFileURL(page).href,
+    });
+    browsers.push(browser);
+
+    const child = spawn(
+      process.execPath,
+      [
+        "scripts/rea.mjs",
+        "inspect-electron-page",
+        browser.endpoint,
+        "electron-page",
+        "--observation-ms",
+        "60000",
+        "--json",
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const closed = new Promise<{
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    }>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    const hardStop = setTimeout(() => child.kill("SIGKILL"), 15_000);
+    try {
+      await vi.waitFor(
+        () => {
+          expect(
+            browser.commands.some(({ method }) => method === "Runtime.enable"),
+          ).toBe(true);
+        },
+        { timeout: 5_000 },
       );
-      const exited = new Promise<number | null>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (code) => resolve(code));
-      });
-      const deadline = Date.now() + INTEGRATION_TEST_TIMEOUT_MS;
-      while (
-        !browser.commands.some(({ method }) => method === "Debugger.enable") &&
-        Date.now() < deadline
-      )
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(
-        browser.commands.some(({ method }) => method === "Debugger.enable"),
-      ).toBe(true);
       child.kill("SIGINT");
 
-      await expect(exited).resolves.toBe(130);
-      expect(
-        browser.commands.some(
-          ({ method }) => method === "Target.detachFromTarget",
-        ),
-      ).toBe(true);
-      expect(browser.openedConnectionCount()).toBe(1);
-    },
-    INTEGRATION_TEST_TIMEOUT_MS,
-  );
-
-  it(
-    "returns the same endpoint-scoped Electron Evidence contracts",
-    async () => {
-      const root = await createTestTempDirectory("rea-electron-cli-");
-      temporary.push(root);
-      await writeFile(
-        join(root, "index.html"),
-        "<script src='app.js'></script>",
-      );
-      await writeFile(join(root, "app.js"), "export const app = true;");
-      const browser = await startFakeCdpBrowser({
-        electronFileUrl: pathToFileURL(join(root, "index.html")).href,
-        commandEvents: ({ method }) =>
-          method === "Debugger.enable"
-            ? [
-                {
-                  method: "Debugger.scriptParsed",
-                  sessionId: "session-1",
-                  params: {
-                    scriptId: "partial-script",
-                    url: pathToFileURL(join(root, "app.js")).href,
-                    executionContextId: 1,
-                  },
-                },
-              ]
-            : undefined,
+      const result = await closed;
+      expect(result, stderr).toEqual({ code: 130, signal: null });
+      expect(JSON.parse(stdout)).toMatchObject({
+        code: "cancelled",
+        category: "cancelled",
+        details: { operation: "inspect_electron_page" },
       });
-      browsers.push(browser);
-      const environment = { ...process.env };
-      const listed = await runCli(
-        ["list-electron-targets", browser.endpoint, "--json"],
-        environment,
-      );
-      expect(listed).toMatchObject({
-        operation: "list_electron_targets",
-        normalized_result: {
-          targets: [{ target_id: "electron-page" }],
+      const methods = browser.commands.map(({ method }) => method);
+      expect(methods).toContain("Target.detachFromTarget");
+      expect(methods).not.toContain("Target.closeTarget");
+      expect(methods).not.toContain("Browser.close");
+      await vi.waitFor(() => expect(browser.activeConnectionCount()).toBe(0));
+      expect((await fetch(`${browser.endpoint}/json/version`)).ok).toBe(true);
+    } finally {
+      clearTimeout(hardStop);
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await closed;
+      }
+    }
+  },
+  INTEGRATION_TEST_TIMEOUT_MS,
+);
+
+it(
+  "returns the static JavaScript application Evidence contract",
+  async () => {
+    const root = await createTestTempDirectory("rea-electron-static-cli-");
+    temporary.push(root);
+    await writeElectronBoundaryFixture(root);
+    const environment = {
+      ...process.env,
+    };
+
+    const analyzed = await runCli(
+      ["analyze-javascript-application", root, "--json"],
+      environment,
+    );
+
+    expect(analyzed).toMatchObject({
+      operation: "analyze_javascript_application",
+      provider: { id: "rea-javascript-application" },
+      normalized_result: {
+        input_path: root,
+        summary: {
+          browser_windows: 3,
+          context_bridge_apis: 2,
+          ipc: { paired_renderer_transmissions: 4 },
         },
-      });
-      const inspected = await runCli(
-        [
-          "inspect-electron-page",
-          browser.endpoint,
-          "electron-page",
-          "--observation-ms",
-          "0",
-          "--json",
-        ],
-        environment,
-      );
-      expect(inspected).toMatchObject({
-        operation: "inspect_electron_page",
-        provider: { id: "rea-cdp-electron" },
-        normalized_result: {
-          target: { file_path: join(root, "index.html") },
-          scripts: {
-            items: [{ cdp_hash: null, length: null, is_module: null }],
-          },
-        },
-      });
-    },
-    INTEGRATION_TEST_TIMEOUT_MS,
-  );
-
-  it(
-    "returns the static JavaScript application Evidence contract",
-    async () => {
-      const root = await createTestTempDirectory("rea-electron-static-cli-");
-      temporary.push(root);
-      await writeElectronBoundaryFixture(root);
-      const environment = {
-        ...process.env,
-      };
-
-      const analyzed = await runCli(
-        ["analyze-javascript-application", root, "--json"],
-        environment,
-      );
-
-      expect(analyzed).toMatchObject({
-        operation: "analyze_javascript_application",
-        provider: { id: "rea-javascript-application" },
-        normalized_result: {
-          input_path: root,
-          summary: {
-            browser_windows: 3,
-            context_bridge_apis: 2,
-            ipc: { paired_renderer_transmissions: 4 },
-          },
-        },
-      });
-    },
-    INTEGRATION_TEST_TIMEOUT_MS,
-  );
-});
-
+      },
+    });
+  },
+  INTEGRATION_TEST_TIMEOUT_MS,
+);
 describe("Electron CLI artifact behavior", () => {
   it(
     "keeps artifact format separate from structured output format",

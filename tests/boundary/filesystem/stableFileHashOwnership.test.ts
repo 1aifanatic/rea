@@ -212,7 +212,7 @@ it("distinguishes a thrown undefined primary failure from a clean hash", async (
   }
 });
 
-it("retries publisher-owned launcher hash cleanup at close", async () => {
+it("retries a publisher-owned launcher hash close before returning its digest", async () => {
   const root = await createTestTempDirectory("rea-publisher-hash-owner-");
   const path = join(root, "launcher");
   await writeFile(path, "fixture launcher bytes");
@@ -221,10 +221,10 @@ it("retries publisher-owned launcher hash cleanup at close", async () => {
     .spyOn(OwnedFileHandle.prototype, "close")
     .mockRejectedValueOnce(new Error("fixture launcher close failure"));
   try {
-    await expect(publisher.hashLauncher(path)).rejects.toBeInstanceOf(
-      RegularFileCleanupFailure,
+    await expect(publisher.hashLauncher(path)).resolves.toMatch(
+      /^[a-f0-9]{64}$/u,
     );
-    expect(close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledTimes(2);
     close.mockRestore();
     await publisher.close();
   } finally {
@@ -246,9 +246,9 @@ it("retries pending cleanup before acquiring a publisher temporary root", async 
     .mockRejectedValue(new Error("fixture close remains unavailable"));
   const createRoot = vi.spyOn(PrivateRuntimeRoot, "create");
   try {
-    await expect(publisher.hashLauncher(path)).rejects.toBeInstanceOf(
-      RegularFileCleanupFailure,
-    );
+    await expect(publisher.hashLauncher(path)).rejects.toMatchObject({
+      reason: "cleanup_failed",
+    });
     await expect(
       publisher.retainVerifiedArchive({} as VerifiedLinuxHopperPackage, path),
     ).rejects.toMatchObject({ cleanup: { resources: [path] } });

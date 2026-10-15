@@ -26,7 +26,6 @@ import {
 } from "../domain/webSourceLocation.js";
 import { webSourceOffset } from "../domain/webSourcePosition.js";
 import type { ExecutionOptions } from "./AnalysisProvider.js";
-import { completeProviderEvidence } from "./ProviderOperationExecution.js";
 import {
   capturedWebManifestIdentity,
   validateSelectedWebScript,
@@ -35,6 +34,7 @@ import type {
   WebSourceLocationArtifactPort,
   WebSourceMapPort,
 } from "./WebSourceLocationPorts.js";
+import { completeProviderEvidence } from "./ProviderOperationExecution.js";
 
 const OPERATION = "trace_web_source_location";
 const artifactsSchema = selectedWebScriptArtifactsSchema.extend({

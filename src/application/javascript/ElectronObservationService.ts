@@ -2,16 +2,22 @@ import type { ExecutionOptions } from "../AnalysisProvider.js";
 import type { ElectronObservationPort } from "./ElectronObservationPort.js";
 import type { Evidence } from "../../domain/evidence.js";
 import type {
+  ElectronPageInspection,
   InspectElectronPageInput,
   ListElectronTargetsInput,
 } from "../../domain/javascript/electronObservation.js";
 import {
   AnalysisCancelledError,
   AnalysisCapabilityUnavailableError,
+  AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import { createElectronEvidence } from "./ElectronEvidence.js";
+import {
+  electronPageInspectionSchema,
+  electronTargetListSchema,
+} from "../../domain/javascript/electronObservation.js";
 import { completeProviderEvidence } from "../ProviderOperationExecution.js";
 
 /** List local file pages exposed by the explicitly selected endpoint. */
@@ -22,18 +28,28 @@ export const listElectronTargets = async (
 ): Promise<Result<Evidence, AnalysisError>> => {
   const ready = requireProvider(provider, "list_electron_targets");
   if (!ready.ok) return ready;
+  if (options.signal?.aborted)
+    return err(new AnalysisCancelledError("list_electron_targets"));
   const result = await ready.value.listTargets(input, options);
-  return result.ok
-    ? completeProviderEvidence(
-        createElectronEvidence(
-          "list_electron_targets",
-          input,
-          result.value,
-          ready.value.identity(),
-        ),
-        options.signal,
-      )
-    : result;
+  if (!result.ok) return result;
+  const report = electronTargetListSchema.safeParse(result.value);
+  if (!report.success)
+    return err(
+      new AnalysisOutputError(
+        "list_electron_targets",
+        "Electron provider returned a malformed target list.",
+        { cause: report.error },
+      ),
+    );
+  return completeProviderEvidence(
+    createElectronEvidence(
+      "list_electron_targets",
+      input,
+      report.data,
+      ready.value.identity(),
+    ),
+    options.signal,
+  );
 };
 
 /** Inspect one local file page from the explicitly selected endpoint. */
@@ -44,51 +60,64 @@ export const inspectElectronPage = async (
 ): Promise<Result<Evidence, AnalysisError>> => {
   const ready = requireProvider(provider, "inspect_electron_page");
   if (!ready.ok) return ready;
+  if (options.signal?.aborted)
+    return err(new AnalysisCancelledError("inspect_electron_page"));
   const result = await ready.value.inspectPage(input, options);
-  return result.ok
-    ? completeProviderEvidence(
-        createElectronEvidence(
-          "inspect_electron_page",
-          input,
-          result.value,
-          ready.value.identity(),
-        ),
-        options.signal,
-      )
-    : retainCompletedElectronPartial(result, input, ready.value.identity());
-};
-
-const retainCompletedElectronPartial = (
-  result: Result<Evidence, AnalysisError>,
-  input: InspectElectronPageInput,
-  provider: ReturnType<ElectronObservationPort["identity"]>,
-): Result<Evidence, AnalysisError> => {
-  if (
-    result.ok ||
-    !(result.error instanceof AnalysisCancelledError) ||
-    result.error.partialObservation === undefined ||
-    !("kind" in result.error.partialObservation) ||
-    result.error.partialObservation.kind !== "electron-page-observation"
-  )
+  if (!result.ok) {
+    const partial = result.error.partialObservation;
+    if (
+      partial !== undefined &&
+      "kind" in partial &&
+      partial.kind === "electron-page-observation"
+    ) {
+      const report = electronPageInspectionSchema.safeParse(partial.inspection);
+      if (!report.success) {
+        if (result.error instanceof AnalysisCancelledError)
+          return err(
+            new AnalysisOutputError(
+              "inspect_electron_page",
+              "Electron provider retained a malformed completed page inspection.",
+              { cause: report.error },
+            ),
+          );
+        return result;
+      }
+      const inspection = {
+        ...report.data,
+        limitations: [
+          ...report.data.limitations,
+          partial.cleanup === "transport-closed"
+            ? "REA closed its CDP transport; this does not imply target shutdown."
+            : "CDP transport cleanup remains incomplete.",
+        ],
+      } satisfies ElectronPageInspection;
+      result.error.partialObservation = createElectronEvidence(
+        "inspect_electron_page",
+        input,
+        inspection,
+        ready.value.identity(),
+      );
+    }
     return result;
-  const partial = result.error.partialObservation;
-  const inspection = {
-    ...partial.inspection,
-    limitations: [
-      ...partial.inspection.limitations,
-      partial.cleanup === "transport-closed"
-        ? "REA closed its CDP transport; this does not imply target shutdown."
-        : "CDP transport cleanup remains incomplete.",
-    ],
-  };
-  const evidence = createElectronEvidence(
-    "inspect_electron_page",
-    input,
-    inspection,
-    provider,
+  }
+  const report = electronPageInspectionSchema.safeParse(result.value);
+  if (!report.success)
+    return err(
+      new AnalysisOutputError(
+        "inspect_electron_page",
+        "Electron provider returned a malformed page inspection.",
+        { cause: report.error },
+      ),
+    );
+  return completeProviderEvidence(
+    createElectronEvidence(
+      "inspect_electron_page",
+      input,
+      report.data,
+      ready.value.identity(),
+    ),
+    options.signal,
   );
-  result.error.partialObservation = evidence;
-  return result;
 };
 
 const requireProvider = (

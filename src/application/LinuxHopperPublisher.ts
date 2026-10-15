@@ -12,6 +12,7 @@ import { homeDirectoryFromEnvironment } from "../config/homeDirectory.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { hashStableFile } from "../filesystem/StableFileHash.js";
 import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import { readBoundedFileBytes } from "../process/BoundedFileBytes.js";
 import { verifyDetachedPgpSignature } from "../process/DetachedPgpSignature.js";
 import { execFileOutput } from "../process/ExecFileOutput.js";
@@ -584,18 +585,52 @@ export class LinuxHopperPublisher {
     path: string,
     signal: AbortSignal | undefined,
     resources: ArtifactResourceScope,
-  ) {
-    return hashStableFile(path, {
-      ...(signal === undefined ? {} : { signal }),
-      retainFailedClose: (handle: OwnedFileHandle) => {
-        resources.retain({
+  ): Promise<Awaited<ReturnType<typeof hashStableFile>>> {
+    let retainedOwner: ArtifactResourceOwner | undefined;
+    try {
+      return await hashStableFile(path, {
+        ...(signal === undefined ? {} : { signal }),
+        retainFailedClose: (handle: OwnedFileHandle) => {
+          retainedOwner = {
+            kind: "file-handle",
+            resource: path,
+            handle,
+          };
+          resources.retain(retainedOwner);
+          if (resources === this.#resources) pendingCleanup.add(resources);
+        },
+      });
+    } catch (cause: unknown) {
+      if (!(cause instanceof RegularFileCleanupFailure)) throw cause;
+      const hashFailure = cause as RegularFileCleanupFailure<
+        Awaited<ReturnType<typeof hashStableFile>>
+      >;
+      const owner =
+        retainedOwner ??
+        ({
           kind: "file-handle",
           resource: path,
-          handle,
-        });
+          handle: hashFailure.owner,
+        } satisfies ArtifactResourceOwner);
+      const released = await resources.release(owner);
+      if (released.kind === "failed") {
         if (resources === this.#resources) pendingCleanup.add(resources);
-      },
-    });
+        throw new HopperReleaseError(
+          "cleanup_failed",
+          `Hopper publisher retained file descriptor cleanup for ${path}.`,
+          {
+            cause: new AggregateError(
+              [cause, released.cause],
+              "Stable file hash and descriptor cleanup failed",
+              { cause },
+            ),
+          },
+        );
+      }
+      if (hashFailure.outcome.kind === "failed")
+        throw hashFailure.outcome.cause;
+      return hashFailure.outcome.value;
+    }
   }
 
   async #cachedPackage(

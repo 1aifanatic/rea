@@ -105,12 +105,11 @@ it("cancels before invocation and after an acquired observation", async () => {
       return Promise.resolve(ok(recordedCrashFixture()));
     },
   });
-  expect(
-    await service.inspect(
-      { path: "/artifacts/source-owned.core" },
-      { signal: controller.signal },
-    ),
-  ).toMatchObject({
+  const late = await service.inspect(
+    { path: "/artifacts/source-owned.core" },
+    { signal: controller.signal },
+  );
+  expect(late).toMatchObject({
     ok: false,
     error: {
       _tag: "AnalysisCancelledError",
@@ -121,6 +120,12 @@ it("cancels before invocation and after an acquired observation", async () => {
       },
     },
   });
+  if (!late.ok) {
+    expect(parseEvidence(late.error.partialObservation)).toMatchObject({
+      operation: "inspect_recorded_crash",
+      normalized_result: recordedCrashFixture(),
+    });
+  }
   const untouched = new RecordedCrashService({
     inspectAndClose(input, options) {
       return this.inspect(input, options);
@@ -173,6 +178,24 @@ it.each(["different-path", "invalid-digest", "outside-range"])(
         _tag: "AnalysisOutputError",
         capturedOutput: fixture.diagnostics,
       },
+    });
+    const controller = new AbortController();
+    const lateInvalid = await new RecordedCrashService({
+      inspectAndClose(input, options) {
+        return this.inspect(input, options);
+      },
+      identity: RECORDED_CRASH_TEST_PROVIDER,
+      inspect: () => {
+        controller.abort();
+        return Promise.resolve(ok(fixture));
+      },
+    }).inspect(
+      { path: "/artifacts/source-owned.core" },
+      { signal: controller.signal },
+    );
+    expect(lateInvalid).toMatchObject({
+      ok: false,
+      error: { _tag: "AnalysisOutputError" },
     });
   },
 );

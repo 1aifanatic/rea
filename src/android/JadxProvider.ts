@@ -14,6 +14,7 @@ import {
 } from "../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import type { AndroidRequest } from "../domain/android/androidAnalysis.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
@@ -29,6 +30,7 @@ import {
 import { hashStableFile } from "../filesystem/StableFileHash.js";
 import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { RegularFileChangedError } from "../filesystem/RegularFile.js";
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import {
   inspectJadxAvailability,
   resolveJadxConfigurationInputs,
@@ -67,6 +69,40 @@ const executionError = (context: {
   session: JadxSession | undefined;
 }): AnalysisError => {
   const { cause, request, timeout, signal, session } = context;
+  if (cause instanceof RegularFileCleanupFailure) {
+    const primaryCause =
+      cause.outcome.kind === "failed" ? cause.outcome.cause : undefined;
+    const primary =
+      signal?.aborted === true
+        ? new AnalysisCancelledError(request.operation, {
+            ...(primaryCause === undefined ? {} : { cause: primaryCause }),
+          })
+        : timeout.aborted
+          ? new AnalysisTimeoutError(request.operation, OPERATION_TIMEOUT_MS, {
+              ...(primaryCause === undefined ? {} : { cause: primaryCause }),
+            })
+          : primaryCause instanceof AnalysisError
+            ? primaryCause
+            : new ProviderAdapterError("jadx", request.operation, {
+                cause: primaryCause ?? cause,
+                userMessage:
+                  primaryCause instanceof Error
+                    ? primaryCause.message
+                    : cause.message,
+              });
+    const cleanup = new ProviderCleanupError(
+      "jadx",
+      [cause.path],
+      {
+        reason:
+          cause.cleanupCause instanceof Error
+            ? cause.cleanupCause.message
+            : String(cause.cleanupCause),
+      },
+      { operation: request.operation, cause },
+    );
+    return analysisErrorWithCleanupFailure(primary, cleanup, request.operation);
+  }
   if (signal?.aborted === true)
     return new AnalysisCancelledError(request.operation);
   if (timeout.aborted)
@@ -174,30 +210,16 @@ const cleanup = async (
     previous_error:
       previousError === undefined ? null : projectAnalysisError(previousError),
   };
+  let sessionCloseFailed = false;
+  let sessionCloseCause: unknown;
   try {
     await session?.close();
     resources.session = undefined;
   } catch (cause) {
-    // Retain an uncertain workspace until the caller can resolve process ownership.
-    const error = new ProviderCleanupError(
-      "jadx",
-      [
-        session?.transport.runId ?? "unknown",
-        ...(root === undefined ? [] : [root.path]),
-      ],
-      {
-        ...diagnostics,
-        reason: cause instanceof Error ? cause.message : String(cause),
-        provider_cleanup:
-          cause instanceof ProviderCleanupError
-            ? (cause.diagnostics ?? null)
-            : null,
-      },
-      { cause: previousError ?? cause },
-    );
-    if (previousError?.partialObservation !== undefined)
-      error.retainPartialObservation(previousError.partialObservation);
-    return err(error);
+    // Still drain independent hash descriptors, but keep the workspace until
+    // this session's process ownership is proven stopped.
+    sessionCloseFailed = true;
+    sessionCloseCause = cause;
   }
   const failedHandles: {
     readonly path: string;
@@ -211,15 +233,46 @@ const cleanup = async (
       failedHandles.push({ path, owner, cause });
     }
   }
-  if (failedHandles.length > 0) {
-    const error = new ProviderCleanupError(
+  const closedHandles = new Set(
+    resources.fileHandles.filter(
+      ({ owner }) => !failedHandles.some((failed) => failed.owner === owner),
+    ),
+  );
+  for (const owner of closedHandles) {
+    const index = resources.fileHandles.indexOf(owner);
+    if (index >= 0) resources.fileHandles.splice(index, 1);
+  }
+  if (sessionCloseFailed || failedHandles.length > 0) {
+    const cleanupCauses = [
+      ...(sessionCloseFailed ? [sessionCloseCause] : []),
+      ...failedHandles.map(({ cause }) => cause),
+    ];
+    const cleanupResources = [
+      ...(!sessionCloseFailed
+        ? []
+        : [
+            session?.transport.runId ?? "unknown",
+            ...(root ? [root.path] : []),
+          ]),
+      ...failedHandles.map(({ path }) => path),
+    ];
+    const cleanupError = new ProviderCleanupError(
       "jadx",
-      failedHandles.map(({ path }) => path),
+      cleanupResources,
       {
         ...diagnostics,
-        reason: "One or more admitted file descriptors remain open.",
-        causes: failedHandles.map(({ cause }) =>
-          cause instanceof Error ? cause.message : String(cause),
+        reason: cleanupCauses
+          .map((failure) =>
+            failure instanceof Error ? failure.message : String(failure),
+          )
+          .join("; "),
+        cleanup_causes: cleanupCauses.map((failure) =>
+          failure instanceof Error ? failure.message : String(failure),
+        ),
+        provider_cleanup: cleanupCauses.map((failure) =>
+          failure instanceof ProviderCleanupError
+            ? (failure.diagnostics ?? null)
+            : null,
         ),
       },
       {
@@ -227,17 +280,16 @@ const cleanup = async (
           [
             ...(previousError === undefined ? [] : [previousError]),
             resources.operationCause,
-            ...failedHandles.map(({ cause }) => cause),
+            ...cleanupCauses,
           ],
-          "JADX operation and hash descriptor cleanup",
+          "JADX operation and resource cleanup failed",
         ),
       },
     );
     if (previousError?.partialObservation !== undefined)
-      error.retainPartialObservation(previousError.partialObservation);
-    return err(error);
+      cleanupError.retainPartialObservation(previousError.partialObservation);
+    return err(cleanupError);
   }
-  resources.fileHandles.length = 0;
   try {
     await root?.close();
     resources.root = undefined;

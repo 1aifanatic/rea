@@ -755,21 +755,17 @@ portableTar(
           f.publicKey,
         ),
       ).toMatchObject({ ok: false, error: { reason: "cleanup_failed" } });
-      expect(events).toEqual(["hash-close-failed-1", "hash-close-failed-2"]);
+      expect(targetCloseAttempts).toBeGreaterThanOrEqual(2);
+      expect(events).not.toContain("temporary-root-close");
+      const attemptsBeforeClose = targetCloseAttempts;
       await expect(f.publisher.close()).rejects.toThrow();
-      expect(events).toEqual([
-        "hash-close-failed-1",
-        "hash-close-failed-2",
-        "hash-close-failed-3",
-      ]);
+      expect(targetCloseAttempts).toBeGreaterThan(attemptsBeforeClose);
+      expect(events).not.toContain("temporary-root-close");
       expect(temporaryRoot).toBeDefined();
       await expect(access(temporaryRoot!)).resolves.toBeUndefined();
       failTargetClose = false;
       await f.publisher.close();
-      expect(events).toEqual([
-        "hash-close-failed-1",
-        "hash-close-failed-2",
-        "hash-close-failed-3",
+      expect(events.slice(-2)).toEqual([
         "hash-close-retried",
         "temporary-root-close",
       ]);
