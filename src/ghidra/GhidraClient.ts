@@ -818,8 +818,9 @@ export class GhidraClient {
     this.#startupOutputCheckpoint = this.#process.checkpointOutput();
     const completed = await this.#connectAndHandshake(endpoint, deadline);
     if (!completed.ok) return this.#startupFailure(completed.error, deadline);
-    this.#startupOutputCheckpoint = undefined;
     await this.#lineage.observe(this.#launch);
+    if (deadline.signal.aborted) return this.#startupInterrupted(deadline);
+    this.#startupOutputCheckpoint = undefined;
     this.#requestQueue.reopen();
     return completed;
   }

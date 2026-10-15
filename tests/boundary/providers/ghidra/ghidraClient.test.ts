@@ -14,6 +14,7 @@ import type { ProgressUpdate } from "../../../../src/application/ProgressReporte
 
 import { ok } from "../../../../src/domain/result.js";
 import { GhidraClient } from "../../../../src/ghidra/GhidraClient.js";
+import { ProviderRunLineage } from "../../../../src/process/ProviderRunLineage.js";
 import { OwnedFileHandle } from "../../../../src/filesystem/OwnedFileHandle.js";
 import { GHIDRA_PROCESS_DIAGNOSTIC_BYTES } from "../../../../src/ghidra/GhidraDiagnostics.js";
 import { GhidraHeadlessLauncher } from "../../../../src/ghidra/GhidraLauncher.js";
@@ -561,6 +562,54 @@ describe("GhidraClient", () => {
 });
 
 describe("GhidraClient startup lifecycle", () => {
+  it("cleans up when the final waiter cancels during lineage observation", async () => {
+    let markObservationPending: (() => void) | undefined;
+    const observationPending = new Promise<void>((resolve) => {
+      markObservationPending = resolve;
+    });
+    let releaseObservation: (() => void) | undefined;
+    const observationGate = new Promise<void>((resolve) => {
+      releaseObservation = resolve;
+    });
+    const originalObserve = ProviderRunLineage.prototype.observe;
+    const observe = vi.spyOn(ProviderRunLineage.prototype, "observe");
+    onTestFinished(() => observe.mockRestore());
+    observe.mockImplementationOnce(async function (
+      this: ProviderRunLineage,
+      launch,
+    ) {
+      markObservationPending?.();
+      await observationGate;
+      return await originalObserve.call(this, launch);
+    });
+
+    const launcher = new FixtureLauncher();
+    const client = clientFor(launcher);
+    const controller = new AbortController();
+    const starting = client.start(controller.signal);
+    await observationPending;
+    const child = launcher.processes[0];
+    if (child === undefined) throw new Error("fixture child was not launched");
+
+    controller.abort();
+    releaseObservation?.();
+
+    await expect(starting).resolves.toMatchObject({
+      ok: false,
+      error: { kind: "cancelled" },
+    });
+    await expect(waitForChildExit(child, 5_000)).resolves.toBe(true);
+    await expect(access(launcher.runtimeRoots[0] ?? "")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(client.callToolIfReady("list_strings", {})).resolves.toBe(
+      undefined,
+    );
+
+    await expect(client.start()).resolves.toMatchObject({ ok: true });
+    expect(launcher.processes).toHaveLength(2);
+  });
+
   it("cancels a retry waiter without taking ownership of startup cleanup", async () => {
     let markLaunchPending: (() => void) | undefined;
     const launchPending = new Promise<void>((resolve) => {
@@ -646,6 +695,16 @@ describe("GhidraClient startup lifecycle", () => {
 });
 
 describe("GhidraClient established requests", () => {
+  it("preserves an expired ping deadline through the request queue", async () => {
+    const client = clientFor(new FixtureLauncher());
+    await expect(client.start()).resolves.toMatchObject({ ok: true });
+
+    await expect(client.ping({ timeoutMs: 0 })).resolves.toMatchObject({
+      ok: false,
+      error: { kind: "timeout", timeoutMs: 0 },
+    });
+  });
+
   it("fails an established function request when the provider process exits", async () => {
     const client = clientFor(new FixtureLauncher("exit_tools"));
     await expect(client.start()).resolves.toMatchObject({ ok: true });
