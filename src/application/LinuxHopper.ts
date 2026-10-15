@@ -440,6 +440,8 @@ export const systemLinuxHopperInstallHost = (
       } catch (cause: unknown) {
         if (
           cause instanceof RegularFileCleanupFailure ||
+          (cause instanceof HopperReleaseError &&
+            cause.reason === "cleanup_failed") ||
           (cause instanceof ArtifactReaderFailure &&
             cause.cleanup !== undefined)
         )
