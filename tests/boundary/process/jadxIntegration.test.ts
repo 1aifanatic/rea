@@ -6,6 +6,7 @@ import { JadxProvider } from "../../../src/android/JadxProvider.js";
 import { androidResultSchemas } from "../../../src/domain/android/androidAnalysis.js";
 import { snapshotAndroidEngine } from "../../../src/android/AndroidTargetSnapshot.js";
 import { hashStableFile } from "../../../src/filesystem/StableFileHash.js";
+import { OwnedFileHandle } from "../../../src/filesystem/OwnedFileHandle.js";
 import { PrivateRuntimeRoot } from "../../../src/process/PrivateRuntimeRoot.js";
 import {
   createJadxProtocolFixture as setup,
@@ -14,6 +15,43 @@ import {
 import { writeJadxJarInventory } from "../../fixtures/android/jadxJar.js";
 
 const it = test.skipIf(process.platform === "win32");
+
+it("retains a failed input hash descriptor until provider shutdown retries it", async () => {
+  const { service, apk, provider, launches } = await setup();
+  const closeCause = new Error("fixture source hash close unavailable");
+  const owners: OwnedFileHandle[] = [];
+  const originalClose = OwnedFileHandle.prototype.close;
+  const close = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockImplementationOnce(async function (this: OwnedFileHandle) {
+      owners.push(this);
+      throw closeCause;
+    })
+    .mockImplementationOnce(async function (this: OwnedFileHandle) {
+      owners.push(this);
+      throw closeCause;
+    });
+  try {
+    const result = await service.execute("inspect_android_package", {
+      path: apk,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { cleanupIncomplete: true },
+    });
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(owners).toHaveLength(2);
+    expect(owners[0]).toBe(owners[1]);
+    await provider.close();
+    expect(close).toHaveBeenCalledTimes(3);
+    expect(owners[0]!.handle.fd).toBe(-1);
+    expect(launches).toHaveLength(0);
+  } finally {
+    close.mockRestore();
+    await provider.close();
+    await verifyCleanup(launches);
+  }
+});
 
 it("cancels Android admission while hashing the selected APK", async () => {
   const { service, apk, launches, provider } = await setup();
@@ -41,7 +79,17 @@ it("cancels Android admission while hashing the selected APK", async () => {
 
 it("rejects a copied JAR that differs from its admitted session identity", async () => {
   const { jar } = await setup();
-  const admitted = (await hashStableFile(jar)).sha256;
+  const hashOwners: OwnedFileHandle[] = [];
+  let admitted: string;
+  try {
+    admitted = (
+      await hashStableFile(jar, {
+        retainFailedClose: (owner) => hashOwners.push(owner),
+      })
+    ).sha256;
+  } finally {
+    await Promise.all(hashOwners.map((owner) => owner.close()));
+  }
   await writeFile(jar, "engine changed between hashing and copying");
   const root = await PrivateRuntimeRoot.create({
     prefix: "rea-jadx-admission-",

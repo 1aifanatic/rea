@@ -106,6 +106,11 @@ export class ArtifactResourceScope {
     }
   }
 
+  /** Adopt an owner after another boundary's cleanup attempt failed. */
+  retain(owner: ArtifactResourceOwner): void {
+    this.#pending.add(owner);
+  }
+
   /** Retry retained owners without closing resource admission. */
   retryCleanup(): Promise<void> {
     if (this.#draining !== undefined) return this.#draining;

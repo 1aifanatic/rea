@@ -17,6 +17,8 @@ import {
   runOwnedCommand,
 } from "../process/OwnedCommand.js";
 import { hashStableFile } from "../filesystem/StableFileHash.js";
+import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import type {
   OwnedProviderProcessSpawnOptions,
   ProviderProcessSnapshot,
@@ -53,6 +55,10 @@ export interface KunaCommandRequest {
   readonly reportedTimeoutMs: number;
   readonly outputBytes: number;
   readonly signal: AbortSignal;
+  readonly retainFailedFileClose: (
+    owner: OwnedFileHandle,
+    resource: string,
+  ) => void;
   readonly launcher?: KunaProcessLauncher | undefined;
 }
 
@@ -87,6 +93,7 @@ const verifiedExecutables = new Map<
 const verifyExecutable = async (
   installation: KunaInstallation,
   signal: AbortSignal,
+  retainFailedFileClose: KunaCommandRequest["retainFailedFileClose"],
 ): Promise<string | undefined> => {
   const status = await stat(installation.executable, { bigint: true });
   const identity = [
@@ -99,7 +106,13 @@ const verifyExecutable = async (
   const known = verifiedExecutables.get(installation.executable);
   let sha256 = known?.identity === identity ? known.sha256 : undefined;
   if (sha256 === undefined) {
-    sha256 = (await hashStableFile(installation.executable, signal)).sha256;
+    sha256 = (
+      await hashStableFile(installation.executable, {
+        signal,
+        retainFailedClose: (owner) =>
+          retainFailedFileClose(owner, installation.executable),
+      })
+    ).sha256;
     verifiedExecutables.set(installation.executable, { identity, sha256 });
   }
   return sha256 === installation.sha256 ? undefined : sha256;
@@ -111,7 +124,11 @@ export const runKunaCommand = async (
 ): Promise<KunaCommandOutcome> => {
   const { installation } = request;
   try {
-    const changed = await verifyExecutable(installation, request.signal);
+    const changed = await verifyExecutable(
+      installation,
+      request.signal,
+      request.retainFailedFileClose,
+    );
     if (changed !== undefined)
       return {
         kind: "failed",
@@ -124,6 +141,16 @@ export const runKunaCommand = async (
         }),
       };
   } catch (cause: unknown) {
+    if (cause instanceof RegularFileCleanupFailure)
+      return {
+        kind: "failed",
+        error: new ProviderCleanupError(
+          KUNA_PROVIDER_ID,
+          [cause.path],
+          { reason: String(cause.cleanupCause) },
+          { cause, operation: request.operation },
+        ),
+      };
     return {
       kind: "failed",
       error: request.signal.aborted

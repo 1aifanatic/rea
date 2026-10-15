@@ -12,9 +12,9 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 
-import { expect, it as test } from "vitest";
+import { expect, it as test, vi } from "vitest";
 
-import { inspectKunaInstallation } from "../../../../src/kuna/KunaInstallation.js";
+import { inspectKunaInstallationOwned as inspectKunaInstallation } from "./kunaFileCloseOwner.js";
 import { cleanupOwnedProcessGroup } from "../../../../src/process/ProcessOwnership.js";
 import { spawnOwnedProviderProcess } from "../../../../src/process/ProviderProcess.js";
 import type { KunaInstallation } from "../../../../src/kuna/KunaInstallation.js";
@@ -24,6 +24,8 @@ import {
 } from "../../../../src/kuna/KunaProjectCache.js";
 import type { KunaExportStatus } from "../../../../src/kuna/KunaProjectExport.js";
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
+import { OwnedFileHandle } from "../../../../src/filesystem/OwnedFileHandle.js";
+import { RegularFileCleanupFailure } from "../../../../src/filesystem/OwnedRegularFile.js";
 import {
   fakeKunaCalls,
   setFakeKunaBehavior,
@@ -186,6 +188,34 @@ it("publishes a verified export and serves later requests from the cache", async
     inventory: built.value.inventory,
   });
   expect(await callsOf(kuna, "decompile-project")).toHaveLength(1);
+});
+
+it("retains a failed warm-cache hash descriptor and retries it at cache close", async () => {
+  const { installation, cache, target } = await fixture(
+    "rea-kuna-cache-hash-owner-",
+  );
+  const input = await target("program");
+  const built = await cache.build({ installation, ...input });
+  if (!built.ok) throw built.error;
+  const closeCause = new Error("injected warm-cache descriptor close failure");
+  const close = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockRejectedValueOnce(closeCause);
+  const warmCache = newCache(installation);
+  try {
+    await expect(warmCache.lookup(built.value.key)).rejects.toBeInstanceOf(
+      RegularFileCleanupFailure,
+    );
+    close.mockRestore();
+    expect(await warmCache.close()).toEqual({ ok: true, value: null });
+    expect(await warmCache.lookup(built.value.key)).toMatchObject({
+      key: built.value.key,
+    });
+  } finally {
+    close.mockRestore();
+    expect(await warmCache.close()).toEqual({ ok: true, value: null });
+    await cache.close();
+  }
 });
 
 it("shares one Kuna run between concurrent requests for one export", async () => {

@@ -8,9 +8,10 @@ import {
   AnalysisCancelledError,
 } from "../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
-import type { ProviderCleanupError } from "../domain/providerCleanupError.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { hashStableFile } from "../filesystem/StableFileHash.js";
+import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { prepareProcessOwnershipInspection } from "../process/ProcessOwnershipObservation.js";
 import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
 import {
@@ -29,6 +30,7 @@ import {
   type KunaProjectFunction,
 } from "./KunaProjectFiles.js";
 import { KUNA_PROVIDER_ID } from "./KunaRelease.js";
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 
 /** Operation name every export and cache failure reports. */
 export const KUNA_EXPORT_OPERATION = "kuna:decompile-project";
@@ -101,6 +103,10 @@ export interface KunaExportRequest {
   /** Directory, inside the workspace, that receives the export's files. */
   readonly output: string;
   readonly signal: AbortSignal;
+  readonly retainFailedFileClose: (
+    owner: OwnedFileHandle,
+    resource: string,
+  ) => void;
   readonly onStatus: (status: KunaExportStatus) => void;
   readonly launcher?: KunaProcessLauncher | undefined;
 }
@@ -118,6 +124,19 @@ export const kunaExportFailure = (
   cause: unknown,
   signal: AbortSignal,
 ): AnalysisError => {
+  if (cause instanceof RegularFileCleanupFailure)
+    return new ProviderCleanupError(
+      KUNA_PROVIDER_ID,
+      [cause.path],
+      {
+        reason: String(cause.cleanupCause),
+        primary_error:
+          cause.outcome.kind === "failed"
+            ? String(cause.outcome.cause)
+            : "none",
+      },
+      { cause, operation: KUNA_EXPORT_OPERATION },
+    );
   if (signal.aborted)
     return new AnalysisCancelledError(KUNA_EXPORT_OPERATION, { cause });
   if (cause instanceof AnalysisError) return cause;
@@ -140,8 +159,13 @@ const unusable = (reason: string): KunaExportOutcome => ({
 const verifyKunaExecutable = async (
   installation: KunaInstallation,
   signal: AbortSignal,
+  retainFailedFileClose: KunaExportRequest["retainFailedFileClose"],
 ): Promise<Result<null, ProviderAdapterError>> => {
-  const executable = await hashStableFile(installation.executable, signal);
+  const executable = await hashStableFile(installation.executable, {
+    signal,
+    retainFailedClose: (owner) =>
+      retainFailedFileClose(owner, installation.executable),
+  });
   if (executable.sha256 === installation.sha256) return ok(null);
   return err(
     new ProviderAdapterError(KUNA_PROVIDER_ID, KUNA_EXPORT_OPERATION, {
@@ -194,6 +218,7 @@ export const exportKunaProject = async (
       outputBytes,
       signal,
       launcher: request.launcher,
+      retainFailedFileClose: request.retainFailedFileClose,
     });
     if (outcome.kind === "ok")
       return { ok: true as const, snapshot: outcome.snapshot };
@@ -266,7 +291,14 @@ export const exportKunaProject = async (
     });
     if (status === undefined || !status.isFile())
       return unusable(`Kuna's export has no regular ${name}.`);
-    files[role] = { path: name, ...(await hashStableFile(path, signal)) };
+    files[role] = {
+      path: name,
+      ...(await hashStableFile(path, {
+        signal,
+        retainFailedClose: (owner) =>
+          request.retainFailedFileClose(owner, path),
+      })),
+    };
   }
   const complete = files as KunaExportFiles;
   const functions = await readKunaExportSource(
@@ -276,7 +308,11 @@ export const exportKunaProject = async (
     signal,
   );
   if (!functions.ok) return unusable(functions.error);
-  const identity = await verifyKunaExecutable(installation, signal);
+  const identity = await verifyKunaExecutable(
+    installation,
+    signal,
+    request.retainFailedFileClose,
+  );
   if (!identity.ok) return { kind: "done", result: identity };
   // `functions.json` holds exactly the text this inventory was parsed from, so
   // publishing reuses it rather than holding a second parsed copy.

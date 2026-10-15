@@ -1,10 +1,15 @@
 import { constants } from "node:fs";
-import { access, open, realpath, stat } from "node:fs/promises";
+import { access, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { JsonValue } from "../domain/jsonValue.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { hashStableFile } from "../filesystem/StableFileHash.js";
+import type { FileCloseResourceOwner } from "../application/AnalysisProvider.js";
+import {
+  RegularFileCleanupFailure,
+  withOwnedRegularFile,
+} from "../filesystem/OwnedRegularFile.js";
 import {
   execFileOutput,
   execFileOutputFailure,
@@ -55,6 +60,14 @@ export interface KunaReadinessFailure {
   readonly diagnostics: Readonly<Record<string, JsonValue>>;
 }
 
+export interface KunaInstallationOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly signal?: AbortSignal;
+  /** Probe deadline; tests shorten it. */
+  readonly probeTimeoutMs?: number;
+  readonly fileCloseResources: FileCloseResourceOwner;
+}
+
 /**
  * Environment for every Kuna child. Kuna unpacks its built-in SLEIGH tree into
  * the per-user cache under HOME (macOS) or XDG_CACHE_HOME (Linux), so both
@@ -83,12 +96,7 @@ const message = (cause: unknown): string =>
 /** Resolve, version-probe and fingerprint the configured executable. */
 export const inspectKunaInstallation = async (
   environment: Readonly<NodeJS.ProcessEnv>,
-  options: {
-    readonly platform?: NodeJS.Platform;
-    readonly signal?: AbortSignal;
-    /** Probe deadline; tests shorten it. */
-    readonly probeTimeoutMs?: number;
-  } = {},
+  options: KunaInstallationOptions,
 ): Promise<Result<KunaInstallation, KunaReadinessFailure>> => {
   const configuration = readKunaConfiguration(environment, options.platform);
   if (!configuration.ok)
@@ -158,9 +166,18 @@ export const inspectKunaInstallation = async (
   let fingerprint: { readonly sha256: string; readonly bytes: number };
   let script: boolean;
   try {
-    fingerprint = await hashStableFile(executable, options.signal);
-    script = await startsWithShebang(executable);
+    fingerprint = await options.fileCloseResources.run(() =>
+      hashStableFile(executable, {
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        retainFailedClose: (owner) =>
+          options.fileCloseResources.retain(owner, executable),
+      }),
+    );
+    script = await options.fileCloseResources.run(() =>
+      startsWithShebang(executable, options.fileCloseResources),
+    );
   } catch (cause: unknown) {
+    if (cause instanceof RegularFileCleanupFailure) throw cause;
     options.signal?.throwIfAborted();
     return failure(
       "executable_missing",
@@ -179,13 +196,19 @@ export const inspectKunaInstallation = async (
   });
 };
 
-const startsWithShebang = async (path: string): Promise<boolean> => {
-  const handle = await open(path, "r");
-  try {
-    const prefix = Buffer.alloc(2);
-    const { bytesRead } = await handle.read(prefix, 0, 2, 0);
-    return bytesRead === 2 && prefix.toString("latin1") === "#!";
-  } finally {
-    await handle.close();
-  }
-};
+const startsWithShebang = (
+  path: string,
+  fileCloseResources: FileCloseResourceOwner,
+): Promise<boolean> =>
+  withOwnedRegularFile(
+    path,
+    {
+      symlinks: "follow",
+      retainFailedClose: (owner) => fileCloseResources.retain(owner, path),
+    },
+    async (handle) => {
+      const prefix = Buffer.alloc(2);
+      const { bytesRead } = await handle.read(prefix, 0, 2, 0);
+      return bytesRead === 2 && prefix.toString("latin1") === "#!";
+    },
+  );

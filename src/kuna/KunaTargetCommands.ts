@@ -24,6 +24,8 @@ import {
 import type { KunaInstallation } from "./KunaInstallation.js";
 import { KUNA_PROVIDER_ID } from "./KunaRelease.js";
 import type { KunaRunRelease } from "./KunaRunSlots.js";
+import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 
 interface Workspace {
   readonly root: PrivateRuntimeRoot;
@@ -48,6 +50,7 @@ export interface KunaTargetCommandRequest {
 
 /** Own the digest-checked target copy and every command that can still use it. */
 export class KunaTargetCommands {
+  readonly #fileCloseResources = new ArtifactResourceScope();
   readonly #active = new Set<Promise<unknown>>();
   readonly #retained: {
     readonly error: ProviderCleanupError;
@@ -110,6 +113,12 @@ export class KunaTargetCommands {
         workspace: workspace.value.root.path,
         reportedTimeoutMs: request.timeoutMs,
         launcher: this.lifetime.launcher,
+        retainFailedFileClose: (owner, resource) =>
+          this.#fileCloseResources.retain({
+            kind: "file-handle",
+            resource,
+            handle: owner,
+          }),
       });
       if (outcome.kind === "retained") {
         this.#retained.push({
@@ -132,6 +141,23 @@ export class KunaTargetCommands {
   async close(): Promise<Result<null, ProviderCleanupError>> {
     this.#closing = true;
     while (this.#active.size > 0) await Promise.allSettled(this.#active);
+    const failures: ProviderCleanupError[] = [];
+    try {
+      await this.#fileCloseResources.close();
+    } catch (cause: unknown) {
+      const observation = ArtifactReaderFailure.cleanupObservation(
+        cause,
+        "Kuna command file descriptor",
+      );
+      failures.push(
+        new ProviderCleanupError(
+          KUNA_PROVIDER_ID,
+          observation.resources,
+          { reason: observation.reason },
+          { cause },
+        ),
+      );
+    }
     for (const retained of [...this.#retained]) {
       const stopped = await retained.owner?.stop();
       if (stopped !== undefined && stopped.status !== "incomplete") {
@@ -139,7 +165,7 @@ export class KunaTargetCommands {
         this.#retained.splice(this.#retained.indexOf(retained), 1);
       }
     }
-    const failures = this.#retained.map(({ error }) => error);
+    failures.push(...this.#retained.map(({ error }) => error));
     const workspace = await this.#workspace;
     if (this.#retained.length === 0) {
       if (workspace?.ok === true) {
@@ -175,6 +201,12 @@ export class KunaTargetCommands {
                   String(failure.diagnostics?.["reason"] ?? failure.message),
                 )
                 .join("; "),
+            },
+            {
+              cause: new AggregateError(
+                failures,
+                "Kuna command cleanup remains incomplete",
+              ),
             },
           ),
         );

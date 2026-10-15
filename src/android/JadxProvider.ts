@@ -27,6 +27,7 @@ import {
   snapshotAndroidTarget,
 } from "./AndroidTargetSnapshot.js";
 import { hashStableFile } from "../filesystem/StableFileHash.js";
+import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { RegularFileChangedError } from "../filesystem/RegularFile.js";
 import {
   inspectJadxAvailability,
@@ -142,9 +143,10 @@ const hashAndroidSource = async (
   path: string,
   operation: string,
   signal: AbortSignal,
+  retainFailedClose: (owner: OwnedFileHandle) => void,
 ): Promise<string> => {
   try {
-    return (await hashStableFile(path, signal)).sha256;
+    return (await hashStableFile(path, { signal, retainFailedClose })).sha256;
   } catch (cause: unknown) {
     if (signal.aborted) throw cause;
     if (cause instanceof RegularFileChangedError)
@@ -156,7 +158,12 @@ const hashAndroidSource = async (
 interface PendingCleanup {
   session: JadxSession | undefined;
   root: JadxWorkspaceRoot | undefined;
+  readonly fileHandles: {
+    readonly path: string;
+    readonly owner: OwnedFileHandle;
+  }[];
   readonly previousError: AnalysisError | undefined;
+  readonly operationCause: unknown;
 }
 
 const cleanup = async (
@@ -192,6 +199,45 @@ const cleanup = async (
       error.retainPartialObservation(previousError.partialObservation);
     return err(error);
   }
+  const failedHandles: {
+    readonly path: string;
+    readonly owner: OwnedFileHandle;
+    readonly cause: unknown;
+  }[] = [];
+  for (const { path, owner } of resources.fileHandles) {
+    try {
+      await owner.close();
+    } catch (cause: unknown) {
+      failedHandles.push({ path, owner, cause });
+    }
+  }
+  if (failedHandles.length > 0) {
+    const error = new ProviderCleanupError(
+      "jadx",
+      failedHandles.map(({ path }) => path),
+      {
+        ...diagnostics,
+        reason: "One or more admitted file descriptors remain open.",
+        causes: failedHandles.map(({ cause }) =>
+          cause instanceof Error ? cause.message : String(cause),
+        ),
+      },
+      {
+        cause: new AggregateError(
+          [
+            ...(previousError === undefined ? [] : [previousError]),
+            resources.operationCause,
+            ...failedHandles.map(({ cause }) => cause),
+          ],
+          "JADX operation and hash descriptor cleanup",
+        ),
+      },
+    );
+    if (previousError?.partialObservation !== undefined)
+      error.retainPartialObservation(previousError.partialObservation);
+    return err(error);
+  }
+  resources.fileHandles.length = 0;
   try {
     await root?.close();
     resources.root = undefined;
@@ -299,7 +345,9 @@ export class JadxProvider implements AndroidAnalysisPort {
       this.#pendingCleanup = {
         session: this.#retained.session,
         root: this.#retained.root,
+        fileHandles: [],
         previousError: undefined,
+        operationCause: undefined,
       };
       this.#retained = undefined;
     }
@@ -330,6 +378,15 @@ export class JadxProvider implements AndroidAnalysisPort {
         : AbortSignal.any([options.signal, timeout]);
     let root: JadxWorkspaceRoot | undefined;
     let session: JadxSession | undefined;
+    const fileHandles: {
+      readonly path: string;
+      readonly owner: OwnedFileHandle;
+    }[] = [];
+    const retainFailedClose =
+      (path: string) =>
+      (owner: OwnedFileHandle): void => {
+        fileHandles.push({ path, owner });
+      };
     try {
       if (target.format !== "apk")
         throw new AnalysisCapabilityUnavailableError(
@@ -347,15 +404,22 @@ export class JadxProvider implements AndroidAnalysisPort {
         configuration.jar,
         request.operation,
         signal,
+        retainFailedClose(configuration.jar),
       );
       const bridgeHash = await hashAndroidSource(
         BRIDGE_SOURCE,
         request.operation,
         signal,
+        retainFailedClose(BRIDGE_SOURCE),
       );
       let targetHash: string;
       try {
-        targetHash = (await hashStableFile(target.path, signal)).sha256;
+        targetHash = (
+          await hashStableFile(target.path, {
+            signal,
+            retainFailedClose: retainFailedClose(target.path),
+          })
+        ).sha256;
       } catch (cause: unknown) {
         if (signal.aborted) throw cause;
         if (cause instanceof RegularFileChangedError)
@@ -418,6 +482,7 @@ export class JadxProvider implements AndroidAnalysisPort {
           bridge,
           request.operation,
           workspaceSignal,
+          retainFailedClose(bridge),
         );
         if (copiedBridgeHash !== bridgeHash)
           throw androidSourceChanged(
@@ -485,7 +550,13 @@ export class JadxProvider implements AndroidAnalysisPort {
       root ??= this.#retained?.root;
       session ??= this.#retained?.session;
       this.#retained = undefined;
-      this.#pendingCleanup = { session, root, previousError };
+      this.#pendingCleanup = {
+        session,
+        root,
+        fileHandles,
+        previousError,
+        operationCause: cause,
+      };
       const retired = await this.#retire();
       return retired.ok ? err(previousError) : retired;
     }

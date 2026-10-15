@@ -15,6 +15,8 @@ import {
 } from "../domain/analysisProfile.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { err, ok } from "../domain/result.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import type { KunaProcessLauncher } from "./KunaCommand.js";
 import {
@@ -162,10 +164,32 @@ export class KunaProvider implements AnalysisProviderCandidate {
   ) {
     if (options?.signal?.aborted === true)
       return err(new AnalysisCancelledError("kuna:profile"));
-    const installation = await inspectKunaInstallation(this.#environment, {
-      platform: this.#platform,
-      ...(options?.signal === undefined ? {} : { signal: options.signal }),
-    });
+    let installation: Awaited<ReturnType<typeof inspectKunaInstallation>>;
+    const fileCloseResources = options?.fileCloseResources;
+    if (fileCloseResources === undefined)
+      return err(
+        kunaUnavailable(
+          "kuna:profile",
+          "Kuna profile inspection requires a durable file resource owner",
+        ),
+      );
+    try {
+      installation = await inspectKunaInstallation(this.#environment, {
+        platform: this.#platform,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        fileCloseResources,
+      });
+    } catch (cause: unknown) {
+      if (!(cause instanceof RegularFileCleanupFailure)) throw cause;
+      return err(
+        new ProviderCleanupError(
+          KUNA_PROVIDER_ID,
+          [cause.path],
+          { reason: String(cause.cleanupCause) },
+          { cause, operation: "kuna:profile" },
+        ),
+      );
+    }
     if (!installation.ok)
       return err(kunaUnavailable("open_binary", installation.error.reason));
     const { value } = installation;

@@ -27,6 +27,7 @@ import {
 import type {
   AdbActivityStartPartialObservation,
   AdbAcquiredFilePartialObservation,
+  AdbPackagePullPartialObservation,
   AdbRequest,
 } from "../domain/adb/adbDeviceAnalysis.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
@@ -49,6 +50,7 @@ import { err, ok, type Result } from "../domain/result.js";
 import type { JsonValue } from "../domain/jsonValue.js";
 import { jsonObjectSchema } from "../domain/jsonValue.js";
 import { hashStableFile } from "../filesystem/StableFileHash.js";
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { createEvidence } from "../domain/evidence.js";
 import {
@@ -139,14 +141,123 @@ const hashAdbFile = async (
   path: string,
   operation: string,
   signal: AbortSignal | undefined,
+  resources: ArtifactResourceScope,
 ) => {
   try {
-    return await hashStableFile(path, signal);
+    return await hashStableFile(path, {
+      ...(signal === undefined ? {} : { signal }),
+      retainFailedClose: (handle) =>
+        resources.retain({
+          kind: "file-handle",
+          resource: `${path} (ADB digest handle)`,
+          handle,
+        }),
+    });
   } catch (cause: unknown) {
+    if (cause instanceof RegularFileCleanupFailure) throw cause;
     if (signal?.aborted === true)
       throw new AnalysisCancelledError(operation, { cause });
     throw cause;
   }
+};
+
+const adbDigestCleanupError = (
+  cause: unknown,
+  operation: string,
+  signal: AbortSignal | undefined,
+  partialObservation:
+    | AdbAcquiredFilePartialObservation
+    | AdbPackagePullPartialObservation,
+): AnalysisError | undefined => {
+  if (!(cause instanceof RegularFileCleanupFailure)) return undefined;
+  const digestFailure = cause as RegularFileCleanupFailure<AdbFileDigest>;
+  const digestOutcome = digestFailure.outcome;
+  if (digestOutcome.kind === "completed")
+    partialObservation = partialObservationWithDigest(
+      partialObservation,
+      digestOutcome.value,
+    );
+  const resource = `${digestFailure.path} (ADB digest handle)`;
+  const reason =
+    digestFailure.cleanupCause instanceof Error
+      ? digestFailure.cleanupCause.message
+      : String(digestFailure.cleanupCause);
+  const cleanup = new ProviderCleanupError(
+    ADB_PROVIDER_IDENTITY.id,
+    [resource],
+    { reason },
+    {
+      operation,
+      cause: digestFailure,
+      partialObservation,
+    },
+  );
+  const primaryCause =
+    digestOutcome.kind === "failed" ? digestOutcome.cause : undefined;
+  if (
+    signal?.aborted === true ||
+    primaryCause instanceof AnalysisCancelledError
+  )
+    return new AnalysisCancelledError(operation, {
+      cause: digestFailure,
+      cleanup: { reason, resources: [resource] },
+      partialObservation,
+    });
+
+  const primary =
+    primaryCause instanceof AnalysisError
+      ? primaryCause
+      : new AnalysisOutputError(
+          operation,
+          `The pulled file could not be fully digested or its handle could not be closed: ${digestFailure.path}`,
+          {
+            cause: primaryCause ?? digestFailure,
+            partialObservation,
+          },
+        );
+  primary.retainPartialObservation(partialObservation);
+  return analysisErrorWithCleanupFailure(primary, cleanup, operation);
+};
+
+type AdbFileDigest = Awaited<ReturnType<typeof hashStableFile>>;
+
+const partialObservationWithDigest = (
+  observation:
+    | AdbAcquiredFilePartialObservation
+    | AdbPackagePullPartialObservation,
+  digest: AdbFileDigest,
+): AdbAcquiredFilePartialObservation | AdbPackagePullPartialObservation => {
+  if (observation.operation === "pull_adb_file") {
+    const { result } = observation;
+    if (!("digest_status" in result)) return observation;
+    return {
+      ...observation,
+      result: {
+        client: result.client,
+        serial: result.serial,
+        local_path: result.local_path,
+        device_path: result.device_path,
+        bytes: digest.bytes,
+        sha256: digest.sha256,
+      },
+    };
+  }
+  if (observation.operation === "collect_adb_bugreport") {
+    const { result } = observation;
+    if (!("digest_status" in result)) return observation;
+    return {
+      ...observation,
+      result: {
+        client: result.client,
+        serial: result.serial,
+        local_path: result.local_path,
+        adb_reported_path: result.adb_reported_path,
+        bytes: digest.bytes,
+        sha256: digest.sha256,
+      },
+    };
+  }
+  return observation;
 };
 
 const syncStagedAdbFile = async (
@@ -761,13 +872,13 @@ export class AdbProvider {
                 cause.message,
                 { cause, retryable: cause.retryable },
               )
-          : new AnalysisOutputError(
-              operation,
-              "Could not create an ADB private workspace",
-              {
-                cause,
-              },
-            ),
+            : new AnalysisOutputError(
+                operation,
+                "Could not create an ADB private workspace",
+                {
+                  cause,
+                },
+              ),
       );
     }
 
@@ -1877,6 +1988,7 @@ export class AdbProvider {
           localPath,
           operation,
           signal,
+          this.#resources,
         );
         artifacts.push({
           device_path: entry.device_path,
@@ -1888,6 +2000,58 @@ export class AdbProvider {
           role_basis: "file_name",
         });
       } catch (cause: unknown) {
+        const digestFailure =
+          cause instanceof RegularFileCleanupFailure
+            ? (cause as RegularFileCleanupFailure<AdbFileDigest>)
+            : undefined;
+        const completedDigest =
+          digestFailure?.outcome.kind === "completed"
+            ? digestFailure.outcome.value
+            : undefined;
+        const partialObservation: AdbPackagePullPartialObservation = {
+          provider_id: "adb",
+          operation,
+          result: {
+            client,
+            serial,
+            package_name: packageName,
+            output_directory: directory.value,
+            artifacts:
+              completedDigest === undefined
+                ? artifacts
+                : [
+                    ...artifacts,
+                    {
+                      device_path: entry.device_path,
+                      file_name: entry.file_name,
+                      local_path: localPath,
+                      bytes: completedDigest.bytes,
+                      sha256: completedDigest.sha256,
+                      role: entry.role,
+                      role_basis: "file_name",
+                    },
+                  ],
+            failures: [
+              ...failures,
+              {
+                device_path: entry.device_path,
+                stage: "digest",
+                message:
+                  completedDigest === undefined
+                    ? `The pulled file remains at ${localPath}, but its digest and descriptor cleanup are unconfirmed.`
+                    : `The pulled file digest is known, but its descriptor cleanup is unconfirmed: ${localPath}`,
+              },
+            ],
+            coverage: "partial",
+          },
+        };
+        const cleanupError = adbDigestCleanupError(
+          cause,
+          operation,
+          signal,
+          partialObservation,
+        );
+        if (cleanupError !== undefined) return err(cleanupError);
         if (cause instanceof AnalysisCancelledError)
           return cancelledPackagePull(
             cause,
@@ -1975,6 +2139,7 @@ export class AdbProvider {
         localPath,
         operation,
         signal,
+        this.#resources,
       );
       return ok(
         createAnalysisExecution(
@@ -1995,18 +2160,26 @@ export class AdbProvider {
         ),
       );
     } catch (cause) {
+      const partialObservation: AdbAcquiredFilePartialObservation = {
+        provider_id: "adb",
+        operation,
+        result: {
+          client,
+          serial: input.serial,
+          local_path: localPath,
+          device_path: input.device_path,
+          digest_status: "unknown",
+        },
+      };
+      const cleanupError = adbDigestCleanupError(
+        cause,
+        operation,
+        signal,
+        partialObservation,
+      );
+      if (cleanupError !== undefined) return err(cleanupError);
       if (cause instanceof AnalysisCancelledError) {
-        cause.retainPartialObservation({
-          provider_id: "adb",
-          operation,
-          result: {
-            client,
-            serial: input.serial,
-            local_path: localPath,
-            device_path: input.device_path,
-            digest_status: "unknown",
-          },
-        });
+        cause.retainPartialObservation(partialObservation);
         return err(cause);
       }
       return err(
@@ -2133,7 +2306,8 @@ export class AdbProvider {
           signal,
         );
         if (!deviceDigest.ok) {
-          const cancelled = deviceDigest.error instanceof AnalysisCancelledError;
+          const cancelled =
+            deviceDigest.error instanceof AnalysisCancelledError;
           const completed = receipt(null, "unavailable", [
             cancelled
               ? "The device-side digest check was cancelled after push completed"
@@ -2141,19 +2315,25 @@ export class AdbProvider {
           ]);
           if (cancelled)
             deviceDigest.error.retainPartialObservation(
-              createEvidence(completed.subject ?? undefined, completed.provider, {
-                operation,
-                parameters: input,
-                result: completed.result,
-                rawResult: completed.rawResult,
-                limitations: completed.limitations,
-                locations: completed.locations,
-                confidence: "observed",
-              }),
+              createEvidence(
+                completed.subject ?? undefined,
+                completed.provider,
+                {
+                  operation,
+                  parameters: input,
+                  result: completed.result,
+                  rawResult: completed.rawResult,
+                  limitations: completed.limitations,
+                  locations: completed.locations,
+                  confidence: "observed",
+                },
+              ),
             );
           return cancelled ? err(deviceDigest.error) : ok(completed);
         }
-        const digestMatch = /^([a-f0-9]{64})\s/u.exec(deviceDigest.value.stdout);
+        const digestMatch = /^([a-f0-9]{64})\s/u.exec(
+          deviceDigest.value.stdout,
+        );
         const completed = receipt(digestMatch?.[1] ?? null, "device_sha256sum");
         if (digestMatch !== null && digestMatch[1] !== digest.sha256)
           return err(
@@ -2162,15 +2342,19 @@ export class AdbProvider {
               input.device_path,
               `The device-reported digest does not match the staged local file: ${localPath}`,
               {
-                partialObservation: createEvidence(completed.subject ?? undefined, completed.provider, {
-                  operation,
-                  parameters: input,
-                  result: completed.result,
-                  rawResult: completed.rawResult,
-                  limitations: completed.limitations,
-                  locations: completed.locations,
-                  confidence: "observed",
-                }),
+                partialObservation: createEvidence(
+                  completed.subject ?? undefined,
+                  completed.provider,
+                  {
+                    operation,
+                    parameters: input,
+                    result: completed.result,
+                    rawResult: completed.rawResult,
+                    limitations: completed.limitations,
+                    locations: completed.locations,
+                    confidence: "observed",
+                  },
+                ),
               },
             ),
           );
@@ -2752,6 +2936,7 @@ export class AdbProvider {
           publishedPath,
           operation,
           signal,
+          this.#resources,
         );
         const report = {
           client,
@@ -2774,6 +2959,16 @@ export class AdbProvider {
           }),
         );
       } catch (cause) {
+        const cleanupError =
+          retainedObservation === undefined
+            ? undefined
+            : adbDigestCleanupError(
+                cause,
+                operation,
+                signal,
+                retainedObservation,
+              );
+        if (cleanupError !== undefined) return err(cleanupError);
         if (cause instanceof AnalysisCancelledError) {
           if (retainedObservation !== undefined)
             cause.retainPartialObservation(retainedObservation);

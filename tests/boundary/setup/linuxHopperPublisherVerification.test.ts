@@ -11,6 +11,7 @@ import {
   readFile,
   readdir,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -33,6 +34,7 @@ import {
 import * as signatures from "../../../src/process/DetachedPgpSignature.js";
 import { downloadHopperPackage } from "../../../src/application/HopperDownload.js";
 import { PrivateRuntimeRoot } from "../../../src/process/PrivateRuntimeRoot.js";
+import { OwnedFileHandle } from "../../../src/filesystem/OwnedFileHandle.js";
 import * as leases from "../../../src/process/HopperLease.js";
 import * as nativeCommands from "../../../src/process/ExecFileOutput.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -43,6 +45,7 @@ const verifySignature = signatures.verifyDetachedPgpSignature;
 const sha256 = (bytes: Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
 const linux = it.skipIf(process.platform !== "linux");
+const portableTar = it.skipIf(process.platform === "win32");
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -702,6 +705,83 @@ it("cancels an oversized chunked metadata response before retaining it", async (
   expect(cancelled).toHaveBeenCalledOnce();
 });
 
+portableTar(
+  "retains the temporary root until its failed hash descriptor closes",
+  async () => {
+    const f = await fixture("arch");
+    admitFixturePublisher(f.fingerprint);
+    const events: string[] = [];
+    let targetCloseAttempts = 0;
+    let failTargetClose = true;
+    const targetSize = (await stat(f.launcher)).size;
+    let temporaryRoot: string | undefined;
+    const originalFileClose = OwnedFileHandle.prototype.close;
+    const fileClose = vi
+      .spyOn(OwnedFileHandle.prototype, "close")
+      .mockImplementation(async function (this: OwnedFileHandle) {
+        if ((await this.handle.stat()).size === targetSize) {
+          targetCloseAttempts += 1;
+          if (failTargetClose) {
+            events.push(`hash-close-failed-${targetCloseAttempts}`);
+            throw new Error("Fixture extracted launcher close unavailable");
+          }
+          events.push("hash-close-retried");
+        }
+        return originalFileClose.call(this);
+      });
+    const originalRootClose = PrivateRuntimeRoot.prototype.close;
+    const originalRootCreate = PrivateRuntimeRoot.create;
+    const rootCreate = vi
+      .spyOn(PrivateRuntimeRoot, "create")
+      .mockImplementation(async (options) => {
+        const root = await originalRootCreate.call(PrivateRuntimeRoot, options);
+        temporaryRoot = root.path;
+        return root;
+      });
+    const rootClose = vi
+      .spyOn(PrivateRuntimeRoot.prototype, "close")
+      .mockImplementation(async function (this: PrivateRuntimeRoot) {
+        temporaryRoot = this.path;
+        events.push("temporary-root-close");
+        return originalRootClose.call(this);
+      });
+    try {
+      expect(
+        await f.publisher.verifyArchive(
+          "arch",
+          f.release,
+          f.archive,
+          undefined,
+          f.publicKey,
+        ),
+      ).toMatchObject({ ok: false, error: { reason: "cleanup_failed" } });
+      expect(events).toEqual(["hash-close-failed-1", "hash-close-failed-2"]);
+      await expect(f.publisher.close()).rejects.toThrow();
+      expect(events).toEqual([
+        "hash-close-failed-1",
+        "hash-close-failed-2",
+        "hash-close-failed-3",
+      ]);
+      expect(temporaryRoot).toBeDefined();
+      await expect(access(temporaryRoot!)).resolves.toBeUndefined();
+      failTargetClose = false;
+      await f.publisher.close();
+      expect(events).toEqual([
+        "hash-close-failed-1",
+        "hash-close-failed-2",
+        "hash-close-failed-3",
+        "hash-close-retried",
+        "temporary-root-close",
+      ]);
+    } finally {
+      fileClose.mockRestore();
+      rootClose.mockRestore();
+      rootCreate.mockRestore();
+      await f.publisher.close();
+    }
+  },
+);
+
 linux("retains and retries failed verification cleanup", async () => {
   const f = await fixture();
   admitFixturePublisher(f.fingerprint);
@@ -725,6 +805,31 @@ linux("retains and retries failed verification cleanup", async () => {
     await f.publisher.close();
   }
 });
+
+linux(
+  "retains and retries a launcher hash descriptor after close failure",
+  async () => {
+    const f = await fixture();
+    admitFixturePublisher(f.fingerprint);
+    const closeCause = new Error("Fixture hash descriptor close unavailable");
+    const close = vi
+      .spyOn(OwnedFileHandle.prototype, "close")
+      .mockImplementationOnce(async () => {
+        throw closeCause;
+      });
+    try {
+      expect(await f.publisher.inspectLauncher(f.launcher)).toMatchObject({
+        ok: false,
+        error: { reason: "verification_unavailable" },
+      });
+      await f.publisher.close();
+      expect(close).toHaveBeenCalledTimes(2);
+    } finally {
+      close.mockRestore();
+      await f.publisher.close();
+    }
+  },
+);
 
 linux(
   "preserves cleanup ownership when verification is cancelled",
