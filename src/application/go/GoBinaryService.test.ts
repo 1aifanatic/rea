@@ -167,7 +167,10 @@ it("honors cancellation before reading and after a completed observation", async
   );
   expect(completed.ok).toBe(false);
   if (!completed.ok)
-    expect(completed.error).toBeInstanceOf(AnalysisCancelledError);
+    expect(completed.error).toMatchObject({
+      _tag: "AnalysisCancelledError",
+      partialObservation: { normalized_result: report },
+    });
   const before = await service.inspect(
     { path: report.artifact.path },
     { signal: controller.signal },
@@ -175,4 +178,26 @@ it("honors cancellation before reading and after a completed observation", async
   expect(before.ok).toBe(false);
   if (!before.ok) expect(before.error).toBeInstanceOf(AnalysisCancelledError);
   expect(calls).toBe(1);
+});
+
+it("preserves a malformed report failure when cancellation races provider completion", async () => {
+  const controller = new AbortController();
+  const mismatched = {
+    ...report,
+    artifact: { ...report.artifact, path: "/other" },
+  };
+  const service = new GoBinaryService({
+    identity,
+    inspect: () => {
+      controller.abort();
+      return Promise.resolve(ok(mismatched));
+    },
+  });
+
+  expect(
+    await service.inspect(
+      { path: report.artifact.path },
+      { signal: controller.signal },
+    ),
+  ).toMatchObject({ ok: false, error: { _tag: "AnalysisOutputError" } });
 });

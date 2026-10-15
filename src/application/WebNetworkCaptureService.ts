@@ -12,9 +12,10 @@ import {
 } from "../domain/analysisErrorCore.js";
 import { createAnalysisProfile } from "../domain/analysisProfile.js";
 import { createEvidence, type Evidence } from "../domain/evidence.js";
+import { completeProviderEvidence } from "./ProviderOperationExecution.js";
 import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
 import { jsonObjectSchema } from "../domain/jsonValue.js";
-import { err, ok, type Result } from "../domain/result.js";
+import { err, type Result } from "../domain/result.js";
 import {
   inspectWebNetworkCaptureInputSchema,
   captureSensitiveValues,
@@ -74,8 +75,6 @@ export class WebNetworkCaptureService {
       );
     const loaded = await this.port.inspect(input, options);
     if (!loaded.ok) return failure(loaded.error);
-    if (options?.signal?.aborted)
-      return failure(new AnalysisCancelledError(OPERATION));
     const report = webNetworkCaptureSchema.safeParse(loaded.value);
     if (!report.success)
       return failure(
@@ -159,7 +158,7 @@ export class WebNetworkCaptureService {
       record_ordinals: selected,
       sensitive_value_count: input.sensitive_values.length,
     });
-    return ok(
+    return completeProviderEvidence(
       createEvidence(
         safeSha256 === null
           ? undefined
@@ -198,6 +197,7 @@ export class WebNetworkCaptureService {
             safePath === "" ? [] : [{ kind: "artifact-path", path: safePath }],
         },
       ),
+      options?.signal,
     );
   }
 }

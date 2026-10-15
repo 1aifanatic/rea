@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import {
+  AnalysisCancelledError,
   AnalysisInputError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
@@ -109,6 +110,51 @@ it("rejects a cycle claim the package dependencies do not contain", async () => 
   }).inspect({ path: report.artifact.path });
   expect(result.ok).toBe(false);
   if (!result.ok) expect(result.error).toBeInstanceOf(AnalysisOutputError);
+});
+
+it("retains completed Rust Evidence on late cancellation and keeps output failure precedence", async () => {
+  const controller = new AbortController();
+  const service = new RustBinaryService({
+    identity,
+    inspect: () => {
+      controller.abort();
+      return Promise.resolve(ok(report));
+    },
+  });
+  const cancelled = await service.inspect(
+    { path: report.artifact.path },
+    { signal: controller.signal },
+  );
+  expect(cancelled).toMatchObject({
+    ok: false,
+    error: {
+      _tag: "AnalysisCancelledError",
+      partialObservation: { normalized_result: report },
+    },
+  });
+
+  const invalidController = new AbortController();
+  const mismatched: RustBinary = {
+    ...report,
+    artifact: { ...report.artifact, path: "/artifacts/other" },
+  };
+  const invalid = await new RustBinaryService({
+    identity,
+    inspect: () => {
+      invalidController.abort();
+      return Promise.resolve(ok(mismatched));
+    },
+  }).inspect(
+    { path: report.artifact.path },
+    { signal: invalidController.signal },
+  );
+  expect(invalid).toMatchObject({
+    ok: false,
+    error: { _tag: "AnalysisOutputError" },
+  });
+  expect(cancelled.ok).toBe(false);
+  if (!cancelled.ok)
+    expect(cancelled.error).toBeInstanceOf(AnalysisCancelledError);
 });
 
 it.each([

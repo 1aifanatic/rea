@@ -33,7 +33,10 @@ import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
 import type { WithAdmittedAnalysis } from "./analysisAdmission.js";
 import { runAdmittedToolOperation } from "./admittedToolOperation.js";
-import { createEvidenceToolHandler } from "./contractToolHandler.js";
+import {
+  createEvidenceToolHandler,
+  deliverEvidenceResult,
+} from "./contractToolHandler.js";
 
 interface ElectronToolRegistration {
   readonly artifactResources: ArtifactResourceScope;
@@ -204,29 +207,11 @@ const runElectronTool = async <Input>(
           progress: mcpProgressReporter(context),
         }),
       );
-      if (!result.ok) {
-        const partial = result.error.partialObservation;
-        if (
-          partial !== undefined &&
-          "evidence_id" in partial &&
-          typeof partial.evidence_id === "string"
-        ) {
-          const recorded = options.recordEvidence?.(partial);
-          if (recorded !== undefined)
-            return options.delivery.toRecordedPartialErrorToolResult(
-              result.error,
-              partial.evidence_id,
-              recorded,
-              contract.returnsTargetContent,
-            );
-        }
-        return options.delivery.toCallToolResult(result, contract);
-      }
-      const recorded = options.recordEvidence?.(result.value);
-      return options.delivery.toEvidenceToolResult(
-        result.value,
+      return deliverEvidenceResult(
+        options.server,
+        result,
         contract,
-        recorded,
+        options.recordEvidence,
       );
     },
   );

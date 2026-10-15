@@ -26,6 +26,7 @@ import {
 } from "../domain/webSourceLocation.js";
 import { webSourceOffset } from "../domain/webSourcePosition.js";
 import type { ExecutionOptions } from "./AnalysisProvider.js";
+import { completeProviderEvidence } from "./ProviderOperationExecution.js";
 import {
   capturedWebManifestIdentity,
   validateSelectedWebScript,
@@ -126,8 +127,6 @@ export class WebSourceLocationService {
     if (!traced.ok) return traced;
     const report = verifyReport(input, map.file.sha256, traced.value);
     if (!report.ok) return report;
-    if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
     const limitations = [
       ...LIMITATIONS,
       codecBudgetLimitation(report.value.runtime),
@@ -147,7 +146,7 @@ export class WebSourceLocationService {
       limitations,
     });
     if (!normalized.success) return invalidOutput(normalized.error.message);
-    return ok(
+    return completeProviderEvidence(
       createEvidence(
         {
           path: data.sourceFile.path,
@@ -178,6 +177,7 @@ export class WebSourceLocationService {
               : [data.manifest.source_evidence_id],
         },
       ),
+      options?.signal,
     );
   }
 }
