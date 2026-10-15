@@ -602,7 +602,7 @@ export class BinarySession
       requestActivitySnapshots: client?.requestActivitySnapshots?.() ?? [],
       providerOperationHealth: client?.operationHealthSnapshot?.() ?? null,
       cleanupPending:
-        this.#pendingCleanup !== undefined || this.hasPendingFileCloseResources,
+        this.#pendingCleanup !== undefined || this.hasPendingFileResources,
     });
   }
 

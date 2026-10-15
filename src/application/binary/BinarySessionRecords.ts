@@ -68,8 +68,10 @@ export abstract class BinarySessionRecords {
     run: (operation) => this.#fileCloseResources.run(operation),
   };
 
-  protected get hasPendingFileCloseResources(): boolean {
-    return this.#fileCloseResources.hasPending;
+  protected get hasPendingFileResources(): boolean {
+    return (
+      this.#writeResources.hasPending || this.#fileCloseResources.hasPending
+    );
   }
   readonly #snapshot = new AnalysisSnapshotCache();
   #snapshotInvalidated = false;
