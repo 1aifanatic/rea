@@ -504,9 +504,11 @@ export class BinarySession
     this.#clearRuntimeAvailability();
     const fileResources = await this.closeWriteResources();
     const hashResources = await this.closeFailedFileCloses();
+    const candidateResources = await this.#providerRouter.closeOwnedResources();
     const resourceFailures = [
       ...(fileResources.ok ? [] : [fileResources.error]),
       ...(hashResources.ok ? [] : [hashResources.error]),
+      ...(candidateResources.ok ? [] : [candidateResources.error]),
     ];
     let resourceFailure = resourceFailures[0];
     for (const next of resourceFailures.slice(1))
@@ -602,7 +604,9 @@ export class BinarySession
       requestActivitySnapshots: client?.requestActivitySnapshots?.() ?? [],
       providerOperationHealth: client?.operationHealthSnapshot?.() ?? null,
       cleanupPending:
-        this.#pendingCleanup !== undefined || this.hasPendingFileResources,
+        this.#pendingCleanup !== undefined ||
+        this.hasPendingFileResources ||
+        this.#providerRouter.hasPendingOwnedResources(),
     });
   }
 

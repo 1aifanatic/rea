@@ -404,7 +404,8 @@ at that bounded check. These are historical snapshots, not live process
 inventories, and do not claim that no short-lived descendant existed.
 
 `binary_session.cleanup_pending` reports whether the session retains a provider
-client or file resource whose cleanup has not succeeded. It can be true with
+client, session file resource, or provider-candidate resource whose cleanup
+has not succeeded. It can be true with
 `open: false`; target retirement does not establish resource release. For a
 retained provider client, health, activity, and lineage remain available under
 its original `analysis_run.run_id` where the provider supplies them.

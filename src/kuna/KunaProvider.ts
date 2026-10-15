@@ -222,6 +222,15 @@ export class KunaProvider implements AnalysisProviderCandidate {
     });
   }
 
+  /** Shared cache cleanup belongs to the candidate, not a retired client. */
+  closeOwnedResources() {
+    return this.#cache?.close() ?? Promise.resolve(ok(null));
+  }
+
+  hasPendingOwnedResources(): boolean {
+    return this.#cache?.hasPendingCleanup === true;
+  }
+
   createClient(
     target: BinaryTarget,
     profile?: AnalysisProfileCommitment,
