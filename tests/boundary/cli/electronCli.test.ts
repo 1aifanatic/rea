@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -36,6 +36,55 @@ afterEach(async () => {
 });
 
 describe("Electron CLI parity", () => {
+  it(
+    "cancels a passive page inspection on SIGINT and releases its CDP connection",
+    async () => {
+      const root = await createTestTempDirectory("rea-electron-cancel-cli-");
+      temporary.push(root);
+      await writeFile(join(root, "index.html"), "<main>fixture</main>");
+      const browser = await startFakeCdpBrowser({
+        electronFileUrl: pathToFileURL(join(root, "index.html")).href,
+      });
+      browsers.push(browser);
+      const child = spawn(
+        process.execPath,
+        [
+          "scripts/rea.mjs",
+          "inspect-electron-page",
+          browser.endpoint,
+          "electron-page",
+          "--observation-ms",
+          "10000",
+          "--json",
+        ],
+        { cwd: process.cwd(), env: process.env, stdio: "ignore" },
+      );
+      const exited = new Promise<number | null>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code) => resolve(code));
+      });
+      const deadline = Date.now() + INTEGRATION_TEST_TIMEOUT_MS;
+      while (
+        !browser.commands.some(({ method }) => method === "Debugger.enable") &&
+        Date.now() < deadline
+      )
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(
+        browser.commands.some(({ method }) => method === "Debugger.enable"),
+      ).toBe(true);
+      child.kill("SIGINT");
+
+      await expect(exited).resolves.toBe(130);
+      expect(
+        browser.commands.some(
+          ({ method }) => method === "Target.detachFromTarget",
+        ),
+      ).toBe(true);
+      expect(browser.openedConnectionCount()).toBe(1);
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
+
   it(
     "returns the same endpoint-scoped Electron Evidence contracts",
     async () => {

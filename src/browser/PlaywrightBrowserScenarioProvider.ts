@@ -21,6 +21,7 @@ import {
   type BrowserStepArtifacts,
 } from "../domain/browserScenarioCaptureValues.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { err, ok, type Result } from "../domain/result.js";
@@ -36,6 +37,9 @@ import {
 
 const OPERATION = "capture_browser_scenario" as const;
 import { PLAYWRIGHT_BROWSER_SCENARIO_PROVIDER_IDENTITY } from "./providerIdentities.js";
+
+const signalIsAborted = (signal: AbortSignal | undefined): boolean =>
+  signal?.aborted === true;
 
 type SnapshotKind = BrowserScenario["capture"]["after_each_step"][number];
 const SNAPSHOT_KINDS = [
@@ -325,7 +329,7 @@ const runScenario = async (
       }),
     });
   const completeness = globalCompleteness(scenario, session, steps);
-  return browserScenarioCaptureSchema.parse({
+  const capture = browserScenarioCaptureSchema.parse({
     ...browserScenarioCaptureData({
       session,
       scenario,
@@ -335,6 +339,23 @@ const runScenario = async (
     }),
     completeness,
   });
+  if (
+    signalIsAborted(options.signal) &&
+    capture.steps.every(({ status }) => status === "completed")
+  )
+    throw new AnalysisCancelledError(OPERATION, {
+      partialObservation: {
+        kind: "browser-scenario-observation",
+        capture: {
+          ...capture,
+          limitations: [
+            ...capture.limitations,
+            "Scenario capture was cancelled after all steps completed; the completed capture and cleanup state are retained.",
+          ],
+        },
+      },
+    });
+  return capture;
 };
 
 /** Controlled Playwright/CDP scenario driver with exact process ownership. */

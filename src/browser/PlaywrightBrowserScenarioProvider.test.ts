@@ -121,6 +121,7 @@ class FakeSession implements BrowserScenarioSessionPort {
   performCalls = 0;
   captureCalls = 0;
   onPerform: (() => void) | undefined;
+  onClose: (() => void) | undefined;
   eventGaps: readonly string[] = [];
   eventItems: readonly BrowserScenarioEvent[] = [];
 
@@ -210,6 +211,7 @@ class FakeSession implements BrowserScenarioSessionPort {
 
   close() {
     this.closeCalls += 1;
+    this.onClose?.();
     if (this.failures.close !== undefined)
       return Promise.reject(this.failures.close);
     return Promise.resolve(
@@ -706,6 +708,69 @@ describe("PlaywrightBrowserScenarioProvider request cancellation", () => {
     if (!result.ok) throw result.error;
     expect(result.value.steps[1]?.status).toBe("cancelled");
     expect(session.closeCalls).toBe(1);
+  });
+
+  it("retains the completed capture when cancellation arrives during final close", async () => {
+    const controller = new AbortController();
+    const session = new FakeSession("launch");
+    session.onClose = () => controller.abort();
+    const provider = new PlaywrightBrowserScenarioProvider(() =>
+      Promise.resolve(session),
+    );
+
+    const result = await provider.captureScenario(scenario(), {
+      signal: controller.signal,
+    });
+
+    expect(session.closeCalls).toBe(1);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "AnalysisCancelledError",
+        partialObservation: {
+          kind: "browser-scenario-observation",
+          capture: {
+            browser: { cleanup: "terminated-owned-process" },
+            steps: [{ status: "completed" }, { status: "completed" }],
+          },
+        },
+      },
+    });
+  });
+
+  it("keeps cleanup failure primary when cancellation arrives during a failed close", async () => {
+    const controller = new AbortController();
+    const session = new FakeSession("launch", {
+      close: new Error("fixture close failed"),
+    });
+    session.onClose = () => controller.abort();
+    const provider = new PlaywrightBrowserScenarioProvider(() =>
+      Promise.resolve(session),
+    );
+
+    const result = await provider.captureScenario(scenario(), {
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "BrowserObservationError",
+        reason: "cleanup_failed",
+        partialObservation: {
+          kind: "browser-scenario-observation",
+          capture: {
+            browser: { cleanup: "incomplete" },
+            steps: [{ status: "completed" }, { status: "completed" }],
+          },
+        },
+      },
+    });
+    await expect(provider.close()).rejects.toMatchObject({
+      _tag: "ProviderAdapterError",
+      operation: "capture_browser_scenario",
+    });
+    expect(session.closeCalls).toBe(2);
   });
 });
 

@@ -12,6 +12,7 @@ import {
   type ListElectronTargetsInput,
 } from "../domain/javascript/electronObservation.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import type { BrowserObservationOperation } from "../domain/browserObservationErrors.js";
@@ -109,6 +110,7 @@ export class CdpElectronProvider implements ElectronObservationPort {
     options: ExecutionOptions = {},
   ): Promise<Result<ElectronPageInspection, AnalysisError>> {
     let targetSession: CdpTargetSession | undefined;
+    let inspection: ElectronPageInspection | undefined;
     try {
       const discovery = await discoverCdpEndpoint(
         input.cdp_endpoint,
@@ -122,20 +124,18 @@ export class CdpElectronProvider implements ElectronObservationPort {
         "inspect_electron_page",
         options.signal,
       );
-      return ok(
-        electronPageInspectionSchema.parse(
-          await inspectCdpElectronPage({
-            connection: targetSession.connection,
-            sessionId: targetSession.sessionId,
-            discovery,
-            target,
-            input,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-            ...(options.progress === undefined
-              ? {}
-              : { progress: options.progress }),
-          }),
-        ),
+      inspection = electronPageInspectionSchema.parse(
+        await inspectCdpElectronPage({
+          connection: targetSession.connection,
+          sessionId: targetSession.sessionId,
+          discovery,
+          target,
+          input,
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+          ...(options.progress === undefined
+            ? {}
+            : { progress: options.progress }),
+        }),
       );
     } catch (cause: unknown) {
       return err(providerError(cause, "inspect_electron_page"));
@@ -147,6 +147,21 @@ export class CdpElectronProvider implements ElectronObservationPort {
           options.signal,
         );
     }
+    if (inspection === undefined)
+      return err(
+        new BrowserObservationError("inspect_electron_page", "protocol_error"),
+      );
+    if (options.signal?.aborted === true)
+      return err(
+        new AnalysisCancelledError("inspect_electron_page", {
+          partialObservation: {
+            kind: "electron-page-observation",
+            inspection,
+            cleanup: "transport-closed",
+          },
+        }),
+      );
+    return ok(inspection);
   }
 }
 
