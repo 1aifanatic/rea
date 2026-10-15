@@ -236,6 +236,8 @@ not repair the provider's own completion contract. When callers share startup,
 cancel each waiter independently and verify that the last departure awaits owned
 cleanup while interested peers can still reach readiness. Repeat the same
 shutdown event after a cleanup failure to verify that its listener can retry.
+Exercise non-default lifecycle deadlines through queued requests and their
+consumers; default-only controls cannot detect dropped request options.
 
 For descriptor-backed reads, inject a close failure after a successful read and
 after a primary read or cancellation failure. Verify that the exact descriptor

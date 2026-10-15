@@ -91,6 +91,8 @@ providers need not expose identical state machines.
   Client cancellation alone does not prove native work stopped.
   For atomic publication, document the cancellation cutoff and preserve any
   committed output's publication receipt.
+  Queued and retried work must retain the complete accepted execution controls,
+  including non-default lifecycle deadlines and cancellation signals.
 - Release only owned resources. Attaching owns a connection or session unless
   the provider contract explicitly establishes target ownership. A helper exit,
   missing reply, or missing PID does not establish target exit.
