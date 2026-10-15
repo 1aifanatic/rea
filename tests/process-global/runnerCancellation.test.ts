@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { expect, it, onTestFinished } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 
@@ -135,6 +135,93 @@ it.runIf(process.platform === "win32")(
 );
 
 it.runIf(process.platform === "win32")(
+  "keeps the lock after leader exit and cancels a surviving grandchild by message or disconnect",
+  async () => {
+    await exerciseWindowsGrandchild("message");
+    await exerciseWindowsGrandchild("disconnect");
+  },
+);
+
+async function exerciseWindowsGrandchild(
+  cancellation: "message" | "disconnect",
+): Promise<void> {
+  const directory = await createTestTempDirectory("rea-runner-win-tree-");
+  const activityPath = join(directory, "grandchild-activity.log");
+  const readyPath = join(directory, "grandchild-ready");
+  const leaderExitedPath = join(directory, "leader-exited");
+  const gatePath = join(directory, "grandchild-stop");
+  const grandchild = `
+      const fs = require("node:fs");
+      const activity = ${JSON.stringify(activityPath)};
+      const gate = ${JSON.stringify(gatePath)};
+      fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");
+      const write = () => fs.appendFileSync(activity, "active\\n");
+      write();
+      const timer = setInterval(() => {
+        if (fs.existsSync(gate)) {
+          clearInterval(timer);
+          process.exit(0);
+        }
+        write();
+      }, 20);
+    `;
+  const child = `
+      require("node:child_process").spawn(
+        process.execPath,
+        ["-e", ${JSON.stringify(grandchild)}],
+        { stdio: "ignore" },
+      );
+    `;
+  const leader = `
+      const fs = require("node:fs");
+      process.on("exit", () => fs.writeFileSync(${JSON.stringify(leaderExitedPath)}, "exited"));
+      const child = require("node:child_process").spawn(
+        process.execPath,
+        ["-e", ${JSON.stringify(child)}],
+        { stdio: "ignore" },
+      );
+      child.unref();
+      const waitForGrandchild = setInterval(() => {
+        if (!fs.existsSync(${JSON.stringify(readyPath)})) return;
+        clearInterval(waitForGrandchild);
+        process.stdout.write("ready");
+      }, 10);
+    `;
+  const runner = launchSupervisor(directory, leader);
+  onTestFinished(async () => {
+    await writeFile(gatePath, "stop");
+    await runner.closed;
+  });
+
+  try {
+    await runner.ready;
+    await expect(readFile(readyPath, "utf8")).resolves.toBe("ready");
+    await vi.waitFor(async () =>
+      expect(await readFile(leaderExitedPath, "utf8")).toBe("exited"),
+    );
+    await expect(
+      launch(directory, 'process.stdout.write("unexpected");').closed,
+    ).resolves.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("already running"),
+    });
+
+    if (cancellation === "disconnect") runner.child.disconnect();
+    else runner.child.send("SIGTERM");
+    await expect(runner.closed).resolves.toMatchObject({ code: 143 });
+    const stopped = await readFile(activityPath, "utf8");
+    await delay(100);
+    expect(await readFile(activityPath, "utf8")).toBe(stopped);
+    await expect(
+      launch(directory, 'process.stdout.write("released");').closed,
+    ).resolves.toMatchObject({ code: 0, stdout: "released" });
+  } finally {
+    await writeFile(gatePath, "stop");
+    await runner.closed;
+  }
+}
+
+it.runIf(process.platform === "win32")(
   "stops the owned command after the supervisor IPC disconnects",
   async () => {
     const directory = await createTestTempDirectory(
@@ -245,6 +332,27 @@ it.runIf(process.platform === "win32")(
     const npm = await execute(directory, "npm", ["--version"]);
     expect(npm).toMatchObject({ code: 0, stderr: "" });
     expect(npm.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/u);
+
+    const npmProject = join(directory, "npm project");
+    await mkdir(npmProject, { recursive: true });
+    await writeFile(
+      join(npmProject, "package.json"),
+      JSON.stringify({
+        scripts: {
+          "print-argv":
+            'node -e "process.stdout.write(JSON.stringify(process.argv.slice(1)))" --',
+        },
+      }),
+    );
+    const shimPayload = 'argument with spaces and "quotes" & ^ % !';
+    const npmArgv = await execute(npmProject, "npm", [
+      "run",
+      "print-argv",
+      "--",
+      shimPayload,
+    ]);
+    expect(npmArgv).toMatchObject({ code: 0, stderr: "" });
+    expect(npmArgv.stdout).toContain(JSON.stringify([shimPayload]));
 
     const turbo = await execute(
       directory,
@@ -496,6 +604,12 @@ it("retains lock ownership through a post-spawn child error until close", async 
   expect(injectedSource).toContain(postSpawnInjection);
   expect(injectedSource).toContain("controlled post-spawn child error");
   const copiedSupervisor = join(directory, "run-exclusive-command.mjs");
+  const copiedHelperDirectory = join(directory, "lib");
+  await mkdir(copiedHelperDirectory, { recursive: true });
+  await copyFile(
+    join(process.cwd(), "scripts/lib/windows-owned-command.mjs"),
+    join(copiedHelperDirectory, "windows-owned-command.mjs"),
+  );
   await writeFile(copiedSupervisor, injectedSource);
 
   const gatedCommand = `

@@ -1,0 +1,151 @@
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+
+const require = createRequire(import.meta.url);
+const sourceWindowsProcess = fileURLToPath(
+  new URL("../../src/windows/WindowsOwnedProcess.ts", import.meta.url),
+);
+
+/** Load the source owner without requiring a generated dist tree. */
+export async function loadWindowsOwnedProcessClass() {
+  const { tsImport } = await import("tsx/esm/api");
+  const source = await tsImport(sourceWindowsProcess, import.meta.url);
+  return source.WindowsOwnedProcess;
+}
+
+/** Start an owned Windows command while preserving cross-spawn's shim rules. */
+export function createWindowsOwnedCommand(options) {
+  const {
+    WindowsOwnedProcess,
+    command,
+    arguments: arguments_,
+    cwd,
+    environment,
+    authority,
+  } = options;
+  // This pinned private parser is cross-spawn's own resolution and cmd-shim
+  // boundary. Keep its compatibility coupling here instead of copying its rules.
+  const parse = require("cross-spawn/lib/parse");
+  const parsed = parse(command, arguments_, { cwd, env: environment });
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof parsed.command !== "string" ||
+    !Array.isArray(parsed.args) ||
+    !parsed.args.every((argument) => typeof argument === "string") ||
+    typeof parsed.options !== "object" ||
+    parsed.options === null ||
+    (parsed.options.windowsVerbatimArguments !== undefined &&
+      typeof parsed.options.windowsVerbatimArguments !== "boolean")
+  )
+    throw new TypeError(
+      "cross-spawn returned an unsupported Windows command shape",
+    );
+  return new WindowsOwnedProcess(
+    parsed.command,
+    parsed.args,
+    cwd,
+    environment,
+    parsed.options.windowsVerbatimArguments === true,
+    {
+      protocolStdin: true,
+      ...(authority === undefined ? {} : { authority }),
+    },
+  );
+}
+
+/** Own a native command until its exact Job Object close event. */
+export function superviseWindowsOwnedProcess(
+  child,
+  { retryIntervalMs = 1_000, onCleanupDiagnostic = () => {} } = {},
+) {
+  let closed = false;
+  let hasFirstError = false;
+  let firstError;
+  let retryTimer;
+  let cleanupInFlight = false;
+  let lastCleanupFailure;
+  let reportedCleanupFailure = false;
+
+  const finished = new Promise((resolveResult, reject) => {
+    child.on("error", handleError);
+    child.once("close", (code, signal) => {
+      closed = true;
+      clearTimeout(retryTimer);
+      child.off("error", handleError);
+      if (reportedCleanupFailure) {
+        onCleanupDiagnostic({ type: "cleanup-recovered" });
+        reportedCleanupFailure = false;
+        lastCleanupFailure = undefined;
+      }
+      if (hasFirstError) reject(firstError);
+      else resolveResult({ code, signal });
+    });
+  });
+
+  function handleError(cause) {
+    if (!hasFirstError) {
+      hasFirstError = true;
+      firstError = cause;
+    }
+    requestCleanup();
+  }
+
+  function scheduleRetry() {
+    if (closed || retryTimer !== undefined) return;
+    // Keep this timer referenced: until Job Object close, it is the supervisor's
+    // live ownership observer even after IPC disconnect or stdin EOF.
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      requestCleanup();
+    }, retryIntervalMs);
+  }
+
+  function reportFailure(reason) {
+    if (closed) return;
+    if (reportedCleanupFailure && lastCleanupFailure === reason) return;
+    lastCleanupFailure = reason;
+    reportedCleanupFailure = true;
+    onCleanupDiagnostic({ type: "cleanup-failed", reason });
+  }
+
+  function requestCleanup() {
+    if (closed || cleanupInFlight) return;
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
+    cleanupInFlight = true;
+    let cleanup;
+    try {
+      cleanup = child.cleanup();
+    } catch (cause) {
+      reportFailure(cause instanceof Error ? cause.message : String(cause));
+      cleanupInFlight = false;
+      scheduleRetry();
+      return;
+    }
+    void Promise.resolve(cleanup)
+      .then((result) => {
+        if (!result.cleaned) {
+          reportFailure(
+            result.reason ?? "Windows Job Object cleanup did not complete",
+          );
+          return;
+        }
+        if (!closed) {
+          reportFailure(
+            "Windows Job Object cleanup reported success before its close event",
+          );
+          return;
+        }
+      })
+      .catch((cause) => {
+        reportFailure(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => {
+        cleanupInFlight = false;
+        if (!closed) scheduleRetry();
+      });
+  }
+
+  return { finished, requestCleanup };
+}
