@@ -293,3 +293,43 @@ The new runtime contains 1,633 JS files, tree SHA-256
 under the explicit compact sorted path/hash algorithm in JSON. Agent-trial
 runtime pins remain separate. These controls do not justify a causal speedup
 or whole-agent token claim.
+
+## Review: experiment metadata and failure ownership
+
+Greptile review on `7238fd080` found two valid runner defects: a hardcoded CLI
+version, and a `finally` error which hid command/diagnostic failures. The runner
+now probes `codex --version` through the existing owned-command boundary before
+starting an agent, and records the observed output in successful/failed trials.
+Probe failure or empty output stops the trial. The local real-command smoke
+returned `codex-cli 0.161.0`; historical trials retain their original metadata.
+
+Cleanup retains the original `OwnedCommandFailure` or diagnostic-write aggregate,
+its cleanupResult/resources, the unresolved cleanup owner and private workspace.
+Shared `closeVerifierResources` combines a separate root-cleanup failure with
+the primary error. Snapshot diagnostics use actual retained/observed byte counts,
+not nonexistent stream `truncated` fields. Signal handlers remain installed
+through final cleanup; late cancellation preserves completed trial data and
+returns typed cancellation. Success is printed after finalization.
+
+Eight deterministic cases exercise the real experiment entrypoint, production
+private-root creation/removal and `OwnedCommandFailure`, with controlled command
+and cleanup outcomes: observed version, failed/empty version, retained owner,
+recording failure, root cleanup failure, ordinary timeout, nonzero exit and late
+cleanup-time cancellation. No model, application or orphan process is launched
+by these cases. The baseline exposed the original errors; an intermediate failed
+assertion assumed Node omitted `[Error]` when printing the class and was corrected
+to check the original class/message independently. All attempts remain in JSON.
+
+The final eight cases passed, followed by the complete Python suite (35 bridge
+plus71 experiment cases:106 total, including the eight new cases). Full static,
+docs/five consistency and test-discovery checks passed again; all four historical
+harness patches reconstruct their recorded hashes. The backend runtime remains
+exactly the integrated 1,633-file tree above; no model trial or real-app analysis
+was rerun for these runner-only corrections. Existing fourteen real-app answers
+and their original source/harness versions remain unchanged.
+
+```sh
+python3 -m unittest discover -s experiments/analysis-efficiency \
+  -p test_javascript_facts_agent.py -v
+npm run test:python
+```

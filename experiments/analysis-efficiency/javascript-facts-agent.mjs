@@ -5,6 +5,7 @@ import { join, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { performance } from "node:perf_hooks";
+import { closeVerifierResources } from "../../scripts/lib/verifier-cleanup.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -156,13 +157,37 @@ for (const [key, value] of Object.entries(config))
   args.push("-c", `${key}=${JSON.stringify(value)}`);
 args.push(prompt);
 const start = performance.now();
-let retainWorkspace = false;
+let cleanupOwner;
+let primaryError;
 let commandResult;
+let report;
+let cliVersion = null;
+let phase = "cli-version";
 const controller = new AbortController();
 const cancel = () => controller.abort();
 process.on("SIGINT", cancel);
 process.on("SIGTERM", cancel);
 try {
+  const version = (commandResult = await runOwnedCommand(
+    {
+      command: "codex",
+      arguments: ["--version"],
+      cwd: workspace.path,
+      env: { ...process.env },
+      runId: `rea-facts-cli-version-${randomUUID()}`,
+      expectedCommand: null,
+      sweepTokenOwnedProcesses: true,
+    },
+    { timeoutMs: 10_000, diagnosticBytes: 64 * 1024 },
+    { signal: controller.signal },
+  ));
+  const observedVersion = version.stdout.text.trim();
+  assert.ok(
+    observedVersion.length > 0,
+    "Codex CLI version probe returned no version",
+  );
+  cliVersion = observedVersion;
+  phase = "agent-trial";
   await writeFile(schemaPath, JSON.stringify(schema));
   const result = (commandResult = await runOwnedCommand(
     {
@@ -223,7 +248,7 @@ try {
     harness_sha256: createHash("sha256")
       .update(await readFile(new URL(import.meta.url)))
       .digest("hex"),
-    cli_version: "0.161.0",
+    cli_version: cliVersion,
     enabled_tools: enabled,
     code_mode_host: true,
     prompt,
@@ -258,22 +283,21 @@ try {
   await writeFile(join(values.output, "stderr.log"), result.stderr.text, {
     mode: 0o600,
   });
-  console.log(
-    JSON.stringify({
-      task: values.task,
-      arm: values.arm,
-      elapsed_ms: metadata.elapsed_ms,
-      exit_code: result.exitCode,
-      usage: metadata.usage,
-      tool_calls: tools.length,
-      answered: answer !== null,
-      report: join(values.output, "trial.json"),
-    }),
-  );
+  report = {
+    task: values.task,
+    arm: values.arm,
+    elapsed_ms: metadata.elapsed_ms,
+    exit_code: result.exitCode,
+    usage: metadata.usage,
+    tool_calls: tools.length,
+    answered: answer !== null,
+    report: join(values.output, "trial.json"),
+  };
   if (result.exitCode !== 0 || answer === null) process.exitCode = 1;
 } catch (cause) {
-  retainWorkspace =
-    cause instanceof OwnedCommandFailure && cause.cleanupOwner !== undefined;
+  primaryError = cause;
+  cleanupOwner =
+    cause instanceof OwnedCommandFailure ? cause.cleanupOwner : undefined;
   const snapshot =
     cause instanceof OwnedCommandFailure ? cause.snapshot : commandResult;
   const writes = await Promise.allSettled([
@@ -284,15 +308,41 @@ try {
           task: values.task,
           arm: values.arm,
           classification: "incomplete-pilot",
+          phase,
+          cli_version: cliVersion,
+          requested_model: config.model,
+          reasoning: config.model_reasoning_effort,
           message: cause.message,
           reason:
             cause instanceof OwnedCommandFailure
               ? cause.reason
               : "verification",
           elapsed_ms: performance.now() - start,
-          cleanup_owner_retained: retainWorkspace,
-          stdout_truncated: snapshot?.stdout?.truncated ?? null,
-          stderr_truncated: snapshot?.stderr?.truncated ?? null,
+          cleanup_owner_retained: cleanupOwner !== undefined,
+          retained_workspace:
+            cleanupOwner === undefined ? null : workspace.path,
+          cleanup_failure:
+            cause instanceof OwnedCommandFailure ? cause.cleanupFailure : null,
+          cleanup_result:
+            cause instanceof OwnedCommandFailure
+              ? (cause.cleanupResult ?? null)
+              : null,
+          resources:
+            cause instanceof OwnedCommandFailure ? cause.resources : [],
+          collection_failure:
+            cause instanceof OwnedCommandFailure
+              ? cause.collectionFailure
+              : null,
+          diagnostic_truncated: snapshot?.diagnosticTruncated ?? null,
+          output_incomplete: snapshot?.outputIncomplete ?? null,
+          stdout_truncated:
+            snapshot === null || snapshot === undefined
+              ? null
+              : snapshot.stdout.observedBytes > snapshot.stdout.bytes,
+          stderr_truncated:
+            snapshot === null || snapshot === undefined
+              ? null
+              : snapshot.stderr.observedBytes > snapshot.stderr.bytes,
         },
         null,
         2,
@@ -314,18 +364,32 @@ try {
   const failures = writes
     .filter((r) => r.status === "rejected")
     .map((r) => r.reason);
-  if (failures.length)
-    throw new AggregateError(
+  if (failures.length) {
+    primaryError = new AggregateError(
       [cause, ...failures],
       "Pilot and failure recording failed",
     );
-  throw cause;
+  }
+  throw primaryError;
 } finally {
-  process.off("SIGINT", cancel);
-  process.off("SIGTERM", cancel);
-  if (retainWorkspace)
-    throw new Error(
-      `Command cleanup incomplete; retain workspace ${workspace.path}`,
+  try {
+    await closeVerifierResources(
+      [
+        async () => {
+          if (cleanupOwner === undefined) await workspace.close();
+        },
+      ],
+      primaryError,
     );
-  await workspace.close();
+    if (primaryError === undefined && controller.signal.aborted)
+      throw new OwnedCommandFailure(
+        "cancelled",
+        "Agent pilot cancelled during finalization; completed trial data remains recorded.",
+        commandResult ?? null,
+      );
+  } finally {
+    process.off("SIGINT", cancel);
+    process.off("SIGTERM", cancel);
+  }
 }
+console.log(JSON.stringify(report));
