@@ -59,7 +59,11 @@ export function superviseWindowsOwnedProcess(
   child,
   { retryIntervalMs = 1_000, onCleanupDiagnostic = () => {} } = {},
 ) {
-  let closed = false;
+  const childStdin = child.stdin ?? undefined;
+  let jobClosed = false;
+  let stdinClosed = childStdin === undefined;
+  let settled = false;
+  let closeResult;
   let hasFirstError = false;
   let firstError;
   let retryTimer;
@@ -70,18 +74,31 @@ export function superviseWindowsOwnedProcess(
   const finished = new Promise((resolveResult, reject) => {
     child.on("error", handleError);
     child.once("close", (code, signal) => {
-      closed = true;
+      jobClosed = true;
+      closeResult = { code, signal };
       clearTimeout(retryTimer);
       child.off("error", handleError);
-      if (reportedCleanupFailure) {
-        onCleanupDiagnostic({ type: "cleanup-recovered" });
-        reportedCleanupFailure = false;
-        lastCleanupFailure = undefined;
-      }
-      if (hasFirstError) reject(firstError);
-      else resolveResult({ code, signal });
+      finishWhenClosed(resolveResult, reject);
+    });
+    childStdin?.on("error", handleError);
+    childStdin?.once("close", () => {
+      stdinClosed = true;
+      childStdin.off("error", handleError);
+      finishWhenClosed(resolveResult, reject);
     });
   });
+
+  function finishWhenClosed(resolveResult, reject) {
+    if (!jobClosed || !stdinClosed || settled) return;
+    settled = true;
+    if (reportedCleanupFailure) {
+      onCleanupDiagnostic({ type: "cleanup-recovered" });
+      reportedCleanupFailure = false;
+      lastCleanupFailure = undefined;
+    }
+    if (hasFirstError) reject(firstError);
+    else resolveResult(closeResult);
+  }
 
   function handleError(cause) {
     if (!hasFirstError) {
@@ -92,7 +109,7 @@ export function superviseWindowsOwnedProcess(
   }
 
   function scheduleRetry() {
-    if (closed || retryTimer !== undefined) return;
+    if (jobClosed || retryTimer !== undefined) return;
     // Keep this timer referenced: until Job Object close, it is the supervisor's
     // live ownership observer even after IPC disconnect or stdin EOF.
     retryTimer = setTimeout(() => {
@@ -102,7 +119,7 @@ export function superviseWindowsOwnedProcess(
   }
 
   function reportFailure(reason) {
-    if (closed) return;
+    if (jobClosed) return;
     if (reportedCleanupFailure && lastCleanupFailure === reason) return;
     lastCleanupFailure = reason;
     reportedCleanupFailure = true;
@@ -110,7 +127,7 @@ export function superviseWindowsOwnedProcess(
   }
 
   function requestCleanup() {
-    if (closed || cleanupInFlight) return;
+    if (jobClosed || cleanupInFlight) return;
     clearTimeout(retryTimer);
     retryTimer = undefined;
     cleanupInFlight = true;
@@ -131,19 +148,17 @@ export function superviseWindowsOwnedProcess(
           );
           return;
         }
-        if (!closed) {
+        if (!jobClosed)
           reportFailure(
             "Windows Job Object cleanup reported success before its close event",
           );
-          return;
-        }
       })
       .catch((cause) => {
         reportFailure(cause instanceof Error ? cause.message : String(cause));
       })
       .finally(() => {
         cleanupInFlight = false;
-        if (!closed) scheduleRetry();
+        scheduleRetry();
       });
   }
 

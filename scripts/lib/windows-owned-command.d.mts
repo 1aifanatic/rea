@@ -18,6 +18,7 @@ export interface WindowsOwnedProcessLifecycle extends Pick<
   EventEmitter,
   "on" | "once" | "off"
 > {
+  readonly stdin?: Pick<EventEmitter, "on" | "once" | "off"> | null;
   cleanup(): Promise<{ readonly cleaned: boolean; readonly reason?: string }>;
 }
 
