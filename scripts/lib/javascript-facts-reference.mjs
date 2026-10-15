@@ -26,6 +26,13 @@ export const selectExportedJavaScriptFacts = (parent, query) => {
         identity: node.identity,
         observation_id: observation.observation_id,
         source_map_reference: observation.source_map_reference,
+        ...(query.include_available_property_keys
+          ? {
+              available_property_keys: Object.keys(
+                observation.properties,
+              ).sort(),
+            }
+          : {}),
         properties: Object.fromEntries(
           query.property_keys
             .filter((key) => Object.hasOwn(observation.properties, key))

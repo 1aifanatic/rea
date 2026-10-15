@@ -113,6 +113,12 @@ original Evidence, including location, authority, confidence, coverage and
 limitations. `property_keys` selects exact retained property names; absent keys
 stay omitted and retained null values stay null. An empty list requests only
 identity/provenance. Observations are not merged into a single asserted fact.
+When property names are unknown, opt into
+`include_available_property_keys: true`. Each returned row then lists its
+original `available_property_keys`, without unselected values; combine this with
+`property_keys: []` for discovery only. The default is false, so known-field
+reads do not pay for field inventories. Keep node/observation IDs paired when
+combining rows; location-related observations need not belong to the same node.
 
 `where.paths` compares exact Evidence `artifact-path` values or `source-range`
 sources. Empty query strings remain valid selectors, though current location
@@ -121,6 +127,9 @@ property named `path`, normalize URLs, or reopen files. Omission includes unknow
 locations; an empty list matches none. Optional `where.kinds` filters original
 node kinds, with an empty list likewise matching none. Multiple locations of
 shared content remain separate rows with the same canonical node identity.
+
+These rows select application-graph observations. Semantic relationships and
+semantic unknown records remain in complete parent Evidence and trace tools.
 
 Rows follow retained node/observation order. The default offset/limit is 0/64;
 follow `coverage.next_offset`. Page totals count matching retained observations,

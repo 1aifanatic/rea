@@ -158,6 +158,18 @@ it("pages selected real filesystem observations with shared identities and porta
   expect(identityOnly.page.rows.map(({ evidence }) => evidence)).toEqual(
     full.page.rows.map(({ evidence }) => evidence),
   );
+  const discoveryQuery = {
+    ...query,
+    property_keys: [],
+    include_available_property_keys: true,
+  };
+  expect(ajv.validate(inputSchema, { source, view: discoveryQuery })).toBe(
+    true,
+  );
+  const discovery = await facts(harness, source, discoveryQuery);
+  expect(ajv.validate(outputSchema, discovery.wire.structuredContent)).toBe(
+    true,
+  );
 });
 
 const evidenceWithMixedLocations = () => {
@@ -255,6 +267,34 @@ it("uses exact evidence locations without normalizing display properties or drop
   };
   const all = await facts(harness, source, query);
   expect(all.page.rows).toHaveLength(4);
+  expect(
+    all.page.rows.every(
+      (row) => !Object.hasOwn(row, "available_property_keys"),
+    ),
+  ).toBe(true);
+  const discovery = await facts(harness, source, {
+    ...query,
+    property_keys: [],
+    include_available_property_keys: true,
+  });
+  expect(
+    discovery.page.rows.map(
+      ({ available_property_keys }) => available_property_keys,
+    ),
+  ).toEqual(
+    node.observations.map(({ properties }) => Object.keys(properties).sort()),
+  );
+  expect(
+    discovery.page.rows.every(
+      ({ properties }) => Object.keys(properties).length === 0,
+    ),
+  ).toBe(true);
+  expect(JSON.stringify(discovery.wire)).not.toContain(
+    "unselected_large_field",
+  );
+  expect(discovery.page.rows.map(({ evidence }) => evidence)).toEqual(
+    all.page.rows.map(({ evidence }) => evidence),
+  );
   expect(
     all.page.rows.every(
       ({ properties }) => JSON.stringify(properties) === '{"nullable":null}',

@@ -196,12 +196,6 @@ accept complete inline Evidence or
 for their application input (`application`, or `left`/`right`). `inspect_analysis_view`
 uses the same retained-reference form in `source`, or portable inline Evidence,
 to project a summary, module page, or one module with its recorded observations.
-For exact file/native metadata or processing gaps, use
-`view: {kind: "javascript-facts", where: {paths: ["package.json"]}, property_keys: ["name", "operation", "analysis_status"], limit: 32}`.
-Rows retain canonical node/observation identity and original Evidence. Paths
-match Evidence artifact-path/source-range locations; missing properties remain
-omitted and source coverage stays separate from page exhaustion. Batch paths and
-select only needed property keys; complete Evidence remains accessible by export.
 This notation is
 a template: replace it with the actual returned ID. Versions before 4.1.0 accept only full
 inline Evidence. Use the exact ID
@@ -210,3 +204,15 @@ analysis or select a provider; findings remain inline. Native observation
 arrays still take full Evidence. `close_binary` clears retained references;
 export a bundle before closing, or supply portable inline Evidence in another
 connection. A missing reference includes its ID and recovery guidance.
+
+For exact file/native metadata or processing gaps, use
+`view: {kind: "javascript-facts", where: {paths: ["package.json"]}, property_keys: ["name", "operation", "analysis_status"], limit: 32}`.
+Rows retain canonical node/observation identity and original Evidence. Paths
+match Evidence artifact-path/source-range locations; missing properties remain
+omitted and source coverage stays separate from page exhaustion. Batch paths and
+select only needed property keys; complete Evidence remains accessible by export.
+If names are unknown, opt into `include_available_property_keys: true`; it lists
+the original keys per returned observation without unselected values. Keep each
+row's node/observation identity paired when composing facts.
+These rows select application-graph observations; semantic relationships and
+semantic unknown records remain in the complete parent Evidence and trace tools.

@@ -5,6 +5,9 @@ import {
   type ApplicationNode,
 } from "../javascript/javascriptApplicationGraphSchemas.js";
 
+const propertyKeySchema =
+  applicationNodeObservationSchema.shape.properties.keyType;
+
 /** A homogeneous batch over exact retained observation locations and node kinds. */
 export const javascriptFactsViewRequestSchema = z.strictObject({
   kind: z.literal("javascript-facts"),
@@ -20,9 +23,15 @@ export const javascriptFactsViewRequestSchema = z.strictObject({
     })
     .default({}),
   property_keys: z
-    .array(z.string().min(1))
+    .array(propertyKeySchema)
     .describe(
       "Exact retained observation-property names to read; [] requests identities/provenance only. Missing properties remain omitted, distinct from retained null. No cross-observation merging or inferred values.",
+    ),
+  include_available_property_keys: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Opt into original property names for each returned observation, without unselected values. Use with property_keys: [] to discover fields before reading them.",
     ),
   offset: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().default(64),
@@ -38,7 +47,10 @@ export const javascriptFactRowSchema = applicationNodeSchema
       properties: true,
       evidence: true,
     }).shape,
-  );
+  )
+  .extend({
+    available_property_keys: z.array(propertyKeySchema).exactOptional(),
+  });
 
 type FactRequest = z.infer<typeof javascriptFactsViewRequestSchema>;
 type FactRow = z.infer<typeof javascriptFactRowSchema>;
@@ -62,6 +74,7 @@ export const projectJavaScriptFacts = (
     view.where.paths === undefined ? null : new Set(view.where.paths);
   const kinds =
     view.where.kinds === undefined ? null : new Set(view.where.kinds);
+  if (paths?.size === 0 || kinds?.size === 0) return { rows: [], total: 0 };
   const keys = [...new Set(view.property_keys)];
   const rows: FactRow[] = [];
   let total = 0;
@@ -80,6 +93,13 @@ export const projectJavaScriptFacts = (
         identity: node.identity,
         observation_id: observation.observation_id,
         source_map_reference: observation.source_map_reference,
+        ...(view.include_available_property_keys
+          ? {
+              available_property_keys: Object.keys(
+                observation.properties,
+              ).sort(),
+            }
+          : {}),
         properties: Object.fromEntries(
           keys.flatMap((key) => {
             const value = observation.properties[key];
