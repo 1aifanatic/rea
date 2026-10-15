@@ -521,6 +521,177 @@ const refuseExistingTarget = async (
   return undefined;
 };
 
+const hardLinksUnsupported = (cause: unknown): boolean =>
+  cause instanceof Error &&
+  "code" in cause &&
+  ["EPERM", "EOPNOTSUPP", "ENOTSUP", "ENOSYS", "EXDEV"].includes(
+    String(cause.code),
+  );
+
+const describeAdbFailure = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause);
+
+interface ScreenPublicationCloseFailure {
+  readonly cause: unknown;
+  readonly resource: string;
+}
+
+/** Exclusive-create fallback for filesystems that cannot hard-link staged files. */
+const publishScreenExclusively = async (
+  outputPath: string,
+  bytes: Buffer,
+  resources: ArtifactResourceScope,
+  operation: string,
+  signal: AbortSignal | undefined,
+): Promise<ScreenPublicationCloseFailure | undefined> => {
+  if (signal?.aborted === true) throw new AnalysisCancelledError(operation);
+  const output = await open(outputPath, "wx", 0o600);
+  // Successful exclusive creation is this fallback's cutoff. Finish and sync
+  // the visible file despite later cancellation so its receipt remains known.
+  const ownedOutput = new OwnedFileHandle(output);
+  const handleResource = `${outputPath} (ADB publication handle)`;
+  const closeOnly = {
+    release: () => ownedOutput.close(),
+  };
+  const removeOutput = async (
+    expected: Awaited<ReturnType<typeof output.stat>>,
+  ): Promise<void> => {
+    let current: Awaited<ReturnType<typeof lstat>>;
+    try {
+      current = await lstat(outputPath);
+    } catch (cause: unknown) {
+      if (cause instanceof Error && Reflect.get(cause, "code") === "ENOENT")
+        return;
+      throw cause;
+    }
+    if (
+      current.dev !== expected.dev ||
+      current.ino !== expected.ino ||
+      current.mode !== expected.mode
+    )
+      throw new Error(
+        `The screen output changed before cleanup: ${outputPath}`,
+      );
+    await rm(outputPath);
+  };
+  let rollbackIdentity: Awaited<ReturnType<typeof output.stat>> | undefined;
+  const inspectCloseAndRollback = {
+    async release() {
+      rollbackIdentity ??= await output.stat();
+      await ownedOutput.close();
+      await removeOutput(rollbackIdentity);
+    },
+  };
+  let identity: Awaited<ReturnType<typeof output.stat>>;
+  try {
+    identity = await output.stat();
+  } catch (cause: unknown) {
+    resources.retain({
+      kind: "lease",
+      resource: `${outputPath} (screen output and descriptor)`,
+      lease: inspectCloseAndRollback,
+    });
+    throw new ProviderCleanupError(
+      ADB_PROVIDER_IDENTITY.id,
+      [handleResource, outputPath],
+      {
+        reason:
+          "The newly created screen output identity could not be established; its descriptor remains owned for cleanup retry",
+      },
+      { operation, cause },
+    );
+  }
+  let writeFailure: { readonly cause: unknown } | undefined;
+  try {
+    await output.writeFile(bytes);
+    await output.sync();
+  } catch (cause: unknown) {
+    writeFailure = { cause };
+  }
+  if (writeFailure === undefined) {
+    try {
+      await ownedOutput.close();
+      return undefined;
+    } catch (cause: unknown) {
+      resources.retain({
+        kind: "lease",
+        resource: handleResource,
+        lease: closeOnly,
+      });
+      return { cause, resource: handleResource };
+    }
+  }
+
+  const rollback = {
+    async release() {
+      await ownedOutput.close();
+      await removeOutput(identity);
+    },
+  };
+  try {
+    await ownedOutput.close();
+  } catch (closeCause: unknown) {
+    resources.retain({ kind: "lease", resource: outputPath, lease: rollback });
+    throw new ProviderCleanupError(
+      ADB_PROVIDER_IDENTITY.id,
+      [outputPath],
+      { reason: describeAdbFailure(closeCause) },
+      {
+        operation,
+        cause: new AggregateError(
+          [writeFailure.cause, closeCause],
+          "Screen output write and descriptor cleanup failed",
+          { cause: writeFailure.cause },
+        ),
+      },
+    );
+  }
+  const removed = await resources.release({
+    kind: "lease",
+    resource: outputPath,
+    lease: rollback,
+  });
+  if (removed.kind === "failed")
+    throw new ProviderCleanupError(
+      ADB_PROVIDER_IDENTITY.id,
+      [outputPath],
+      { reason: describeAdbFailure(removed.cause) },
+      {
+        operation,
+        cause: new AggregateError(
+          [writeFailure.cause, removed.cause],
+          "Screen output write and rollback failed",
+          { cause: writeFailure.cause },
+        ),
+      },
+    );
+  throw writeFailure.cause;
+};
+
+const cancellationWithCleanupFailure = (
+  primary: AnalysisCancelledError,
+  cleanup: AnalysisError,
+  resources: readonly string[],
+): AnalysisCancelledError =>
+  new AnalysisCancelledError(primary.operation, {
+    cause: new AggregateError(
+      [primary, cleanup],
+      "ADB cancellation cleanup failed",
+      { cause: primary },
+    ),
+    diagnostics: primary.diagnostics,
+    ...(primary.capturedOutput === undefined
+      ? {}
+      : { capturedOutput: primary.capturedOutput }),
+    cleanup: {
+      reason: [primary.cleanup?.reason, cleanup.message]
+        .filter((reason): reason is string => reason !== undefined)
+        .join("; "),
+      resources: [...new Set([...primary.cleanupResources, ...resources])],
+    },
+    partialObservation: primary.partialObservation,
+  });
+
 /** Publish an ADB-produced archive without replacing an existing caller file. */
 const publishBugreport = async (
   source: string,
@@ -555,6 +726,17 @@ export interface AdbProviderOptions {
 }
 
 type AdbRuntimeRoot = Pick<PrivateRuntimeRoot, "path" | "close">;
+
+/** A root lease releases its children before removing their containing root. */
+const runtimeRootLease = (
+  root: AdbRuntimeRoot,
+  children: ArtifactResourceScope,
+): { release(): Promise<void> } => ({
+  async release() {
+    await children.close();
+    await root.close();
+  },
+});
 
 interface PendingOutputDirectoryCleanup {
   readonly operation: "pull_adb_package" | "collect_adb_bugreport";
@@ -856,6 +1038,7 @@ export class AdbProvider {
     signal: AbortSignal | undefined,
     work: (
       root: AdbRuntimeRoot,
+      children: ArtifactResourceScope,
     ) => Promise<Result<AnalysisExecution, AnalysisError>>,
   ): Promise<Result<AnalysisExecution, AnalysisError>> {
     let root: AdbRuntimeRoot;
@@ -884,10 +1067,11 @@ export class AdbProvider {
 
     let result: Result<AnalysisExecution, AnalysisError> | undefined;
     let primary: AnalysisError | undefined;
+    const children = new ArtifactResourceScope();
     const cleanupCauses: unknown[] = [];
     const cleanupResources: string[] = [];
     try {
-      result = await work(root);
+      result = await work(root, children);
     } catch (cause: unknown) {
       if (cause instanceof AdbInputSnapshotFailure) {
         if (cause.primaryCause instanceof AnalysisError)
@@ -908,14 +1092,20 @@ export class AdbProvider {
       }
     }
 
+    const rootLease = runtimeRootLease(root, children);
     const released = await this.#resources.release({
-      kind: "private-runtime-root",
+      kind: "lease",
       resource: root.path,
-      root,
+      lease: rootLease,
     });
     if (released.kind === "failed") {
       cleanupCauses.push(released.cause);
       cleanupResources.push(root.path);
+      if (
+        released.cause instanceof ArtifactReaderFailure &&
+        released.cause.cleanup !== undefined
+      )
+        cleanupResources.push(...released.cause.cleanup.resources);
     }
 
     if (cleanupCauses.length > 0) {
@@ -927,10 +1117,9 @@ export class AdbProvider {
         result?.ok ? result.value : undefined,
       );
       if (primary instanceof AnalysisCancelledError) {
-        primary.retainSecondaryFailure(cleanup, {
-          cleanup_resources: cleanupResources,
-        });
-        return err(primary);
+        return err(
+          cancellationWithCleanupFailure(primary, cleanup, cleanupResources),
+        );
       }
       if (primary !== undefined)
         return err(
@@ -938,10 +1127,13 @@ export class AdbProvider {
         );
       if (result !== undefined && !result.ok) {
         if (result.error instanceof AnalysisCancelledError) {
-          result.error.retainSecondaryFailure(cleanup, {
-            cleanup_resources: cleanupResources,
-          });
-          return err(result.error);
+          return err(
+            cancellationWithCleanupFailure(
+              result.error,
+              cleanup,
+              cleanupResources,
+            ),
+          );
         }
         return err(
           analysisErrorWithCleanupFailure(result.error, cleanup, operation),
@@ -2226,11 +2418,11 @@ export class AdbProvider {
       },
       { prefix: "rea-adb-input-" },
       signal,
-      async (root) => {
+      async (root, resources) => {
         const digest = await snapshotAdbInput(
           localPath,
           root,
-          this.#resources,
+          resources,
           operation,
           signal,
         );
@@ -2395,11 +2587,11 @@ export class AdbProvider {
       },
       { prefix: "rea-adb-apk-" },
       signal,
-      async (root) => {
+      async (root, resources) => {
         const digest = await snapshotAdbInput(
           apkPath,
           root,
-          this.#resources,
+          resources,
           operation,
           signal,
         );
@@ -2783,16 +2975,33 @@ export class AdbProvider {
       { serial: input.serial, output_directory: directory.value },
       { parent: directory.value, prefix: ".rea-screen-" },
       signal,
-      async (stage) => {
+      async (stage, resources) => {
+        let publicationCloseFailure: ScreenPublicationCloseFailure | undefined;
+        let usedExclusiveFallback = false;
         try {
           const stagedPath = join(stage.path, "screen.png");
           await writeFile(stagedPath, captured.value.stdout, { flag: "wx" });
-          await syncStagedAdbFile(stagedPath, this.#resources, operation);
+          await syncStagedAdbFile(stagedPath, resources, operation);
           if (signal?.aborted === true)
             return err(new AnalysisCancelledError(operation));
-          // A same-filesystem hard link atomically publishes without replacing a
-          // caller-owned destination. This link is the publication cutoff.
-          await link(stagedPath, localPath);
+          try {
+            // A same-filesystem hard link atomically publishes without replacing
+            // caller output. Its success is the publication cutoff.
+            await link(stagedPath, localPath);
+          } catch (cause: unknown) {
+            if (!hardLinksUnsupported(cause)) throw cause;
+            // Exclusive creation prevents replacement, but makes the path
+            // visible while the fallback writes the complete file.
+            usedExclusiveFallback = true;
+            publicationCloseFailure =
+              (await publishScreenExclusively(
+                localPath,
+                captured.value.stdout,
+                resources,
+                operation,
+                signal,
+              )) ?? undefined;
+          }
         } catch (cause: unknown) {
           if (cause instanceof AnalysisError) return err(cause);
           return err(
@@ -2806,25 +3015,39 @@ export class AdbProvider {
         const sha256 = createHash("sha256")
           .update(captured.value.stdout)
           .digest("hex");
-        return ok(
-          createAnalysisExecution(
-            {
-              client,
-              serial: input.serial,
-              local_path: localPath,
-              bytes: captured.value.stdout.byteLength,
-              sha256,
-              width: dimensions.width,
-              height: dimensions.height,
-            },
-            provider,
-            {
-              limitations: [
-                "The capture is one frame at read time; no recording or interaction occurred",
-              ],
-            },
-          ),
+        const completed = createAnalysisExecution(
+          {
+            client,
+            serial: input.serial,
+            local_path: localPath,
+            bytes: captured.value.stdout.byteLength,
+            sha256,
+            width: dimensions.width,
+            height: dimensions.height,
+          },
+          provider,
+          {
+            limitations: [
+              "The capture is one frame at read time; no recording or interaction occurred",
+              ...(usedExclusiveFallback
+                ? [
+                    "The exclusive-create fallback makes the output path visible while its bytes are being written",
+                  ]
+                : []),
+            ],
+          },
         );
+        if (publicationCloseFailure !== undefined)
+          return err(
+            this.#cleanupError(
+              operation,
+              { serial: input.serial, output_directory: directory.value },
+              [publicationCloseFailure.cause],
+              [publicationCloseFailure.resource],
+              completed,
+            ),
+          );
+        return ok(completed);
       },
     );
   }

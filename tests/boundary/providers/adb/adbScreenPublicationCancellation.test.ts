@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { link, readFile } from "node:fs/promises";
+import { link, open, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, onTestFinished, test, vi } from "vitest";
 
@@ -10,6 +10,7 @@ import {
   execFileOutput,
 } from "../../../../src/process/ExecFileOutput.js";
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
+import { PrivateRuntimeRoot } from "../../../../src/process/PrivateRuntimeRoot.js";
 
 vi.mock(
   "../../../../src/process/ExecFileOutput.js",
@@ -23,7 +24,12 @@ vi.mock(
 );
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, link: vi.fn(actual.link) };
+  return {
+    ...actual,
+    link: vi.fn(actual.link),
+    open: vi.fn(actual.open),
+    rm: vi.fn(actual.rm),
+  };
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -116,4 +122,394 @@ test("retains a committed screen capture receipt when cancellation arrives after
   });
   expect(await readFile(join(output, "screen.png"))).toEqual(f.png);
   await f.provider.close();
+});
+
+test("retains the committed receipt and cleanup observation when cancellation races with root cleanup", async () => {
+  const f = await fixture();
+  const runtime = await PrivateRuntimeRoot.create({
+    prefix: "rea-adb-receipt-",
+  });
+  const controller = new AbortController();
+  let closeAttempts = 0;
+  const provider = new AdbProvider({
+    environment: { REA_ADB_PATH: join(f.root, "adb") },
+    createRuntimeRoot: async () => ({
+      path: runtime.path,
+      close: async () => {
+        closeAttempts += 1;
+        if (closeAttempts === 1) throw new Error("controlled cleanup fault");
+        await runtime.close();
+      },
+    }),
+  });
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  vi.mocked(link).mockImplementationOnce(async (...args) => {
+    await actualFs.link(...args);
+    controller.abort();
+  });
+  const output = join(f.root, "captures");
+  const destination = join(output, "screen.png");
+  const result = await provider.execute(
+    {
+      operation: "capture_adb_screen",
+      input: { serial: "device", output_directory: output },
+    },
+    { signal: controller.signal },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected cancellation");
+  expect(result.error._tag).toBe("AnalysisCancelledError");
+  expect(result.error.cleanupIncomplete).toBe(true);
+  expect(result.error.cleanupResources).toContain(runtime.path);
+  expect(parseEvidence(result.error.partialObservation)).toMatchObject({
+    operation: "capture_adb_screen",
+    confidence: "observed",
+    normalized_result: { local_path: destination, bytes: f.png.byteLength },
+  });
+  expect(await readFile(destination)).toEqual(f.png);
+  await provider.close();
+  expect(closeAttempts).toBe(2);
+});
+
+test("publishes screen captures when the output filesystem does not support hard links", async () => {
+  const f = await fixture();
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  vi.mocked(link).mockRejectedValueOnce(
+    Object.assign(new Error("hard links are unsupported"), { code: "EPERM" }),
+  );
+  const output = join(f.root, "captures");
+  const result = await f.provider.execute({
+    operation: "capture_adb_screen",
+    input: { serial: "device", output_directory: output },
+  });
+  expect(result.ok).toBe(true);
+  expect(await readFile(join(output, "screen.png"))).toEqual(f.png);
+  await f.provider.close();
+});
+
+test("does not replace a destination created after the initial existence check", async () => {
+  const f = await fixture();
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  const output = join(f.root, "captures");
+  const destination = join(output, "screen.png");
+  vi.mocked(link).mockImplementationOnce(async (...args) => {
+    await actualFs.writeFile(destination, "caller-owned");
+    throw Object.assign(new Error("hard links are unsupported"), {
+      code: "EPERM",
+    });
+  });
+  const result = await f.provider.execute({
+    operation: "capture_adb_screen",
+    input: { serial: "device", output_directory: output },
+  });
+  expect(result.ok).toBe(false);
+  expect(await readFile(destination, "utf8")).toBe("caller-owned");
+  await f.provider.close();
+});
+
+test("cancellation after a failed hard link but before exclusive creation does not publish", async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  vi.mocked(link).mockImplementationOnce(async () => {
+    controller.abort();
+    throw Object.assign(new Error("hard links are unsupported"), {
+      code: "EPERM",
+    });
+  });
+  const output = join(f.root, "captures");
+  const result = await f.provider.execute(
+    {
+      operation: "capture_adb_screen",
+      input: { serial: "device", output_directory: output },
+    },
+    { signal: controller.signal },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected cancellation");
+  expect(result.error._tag).toBe("AnalysisCancelledError");
+  await expect(readFile(join(output, "screen.png"))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  await f.provider.close();
+});
+
+test("retains a receipt when cancellation arrives after exclusive output creation", async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  const output = join(f.root, "captures");
+  const destination = join(output, "screen.png");
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  vi.mocked(link).mockRejectedValueOnce(
+    Object.assign(new Error("hard links are unsupported"), { code: "EPERM" }),
+  );
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await actualFs.open(...args);
+    if (String(args[0]) === destination) controller.abort();
+    return handle;
+  });
+  const result = await f.provider.execute(
+    {
+      operation: "capture_adb_screen",
+      input: { serial: "device", output_directory: output },
+    },
+    { signal: controller.signal },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected cancellation");
+  expect(result.error._tag).toBe("AnalysisCancelledError");
+  expect(parseEvidence(result.error.partialObservation)).toMatchObject({
+    operation: "capture_adb_screen",
+    confidence: "observed",
+    normalized_result: { local_path: destination, bytes: f.png.byteLength },
+  });
+  expect(await readFile(destination)).toEqual(f.png);
+  await f.provider.close();
+});
+
+test("closes and retains ownership when exclusive output stat fails", async () => {
+  const f = await fixture();
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  const output = join(f.root, "captures");
+  const destination = join(output, "screen.png");
+  let handleOpen = false;
+  let statAttempts = 0;
+  let removeAttempts = 0;
+  let closeAttempts = 0;
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  vi.mocked(link).mockRejectedValueOnce(
+    Object.assign(new Error("hard links are unsupported"), { code: "EPERM" }),
+  );
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await actualFs.open(...args);
+    if (String(args[0]) !== destination) return handle;
+    handleOpen = true;
+    return new Proxy(handle, {
+      get(target, property) {
+        if (property === "stat")
+          return async () => {
+            statAttempts += 1;
+            if (statAttempts <= 2)
+              throw new Error("controlled descriptor stat fault");
+            return target.stat();
+          };
+        if (property === "close")
+          return async () => {
+            closeAttempts += 1;
+            await target.close();
+            handleOpen = false;
+          };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  });
+  const result = await f.provider.execute({
+    operation: "capture_adb_screen",
+    input: { serial: "device", output_directory: output },
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected stat failure");
+  expect(result.error.cleanupIncomplete).toBe(true);
+  expect(result.error.cleanupResources).toContain(destination);
+  expect(closeAttempts).toBe(0);
+  expect(handleOpen).toBe(true);
+  expect(await readFile(destination)).toEqual(Buffer.alloc(0));
+  vi.mocked(rm).mockImplementation(async (path, options) => {
+    if (String(path) === destination && ++removeAttempts === 1)
+      throw new Error("controlled rollback removal fault");
+    return actualFs.rm(path, options);
+  });
+  await expect(f.provider.close()).rejects.toBeDefined();
+  expect(statAttempts).toBe(3);
+  expect(closeAttempts).toBe(1);
+  expect(handleOpen).toBe(false);
+  await f.provider.close();
+  expect(statAttempts).toBe(3);
+  expect(closeAttempts).toBe(1);
+  await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("waits for descriptor close before rolling back an incomplete exclusive output", async () => {
+  const f = await fixture();
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  const output = join(f.root, "captures");
+  const destination = join(output, "screen.png");
+  let handleOpen = false;
+  let closeAttempts = 0;
+  const removeWhileOpen: string[] = [];
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  vi.mocked(link).mockRejectedValueOnce(
+    Object.assign(new Error("hard links are unsupported"), { code: "EPERM" }),
+  );
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await actualFs.open(...args);
+    if (String(args[0]) !== destination) return handle;
+    handleOpen = true;
+    return new Proxy(handle, {
+      get(target, property) {
+        if (property === "writeFile")
+          return async () => {
+            throw new Error("controlled screen write fault");
+          };
+        if (property === "close")
+          return async () => {
+            closeAttempts += 1;
+            if (closeAttempts === 1)
+              throw new Error("controlled descriptor close fault");
+            await target.close();
+            handleOpen = false;
+          };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  });
+  vi.mocked(rm).mockImplementation(async (path, options) => {
+    if (String(path) === destination && handleOpen)
+      removeWhileOpen.push(String(path));
+    return actualFs.rm(path, options);
+  });
+  const result = await f.provider.execute({
+    operation: "capture_adb_screen",
+    input: { serial: "device", output_directory: output },
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected write failure");
+  expect(result.error.cleanupIncomplete).toBe(true);
+  expect(result.error.cleanupResources).toContain(destination);
+  expect(closeAttempts).toBe(2);
+  expect(removeWhileOpen).toEqual([]);
+  await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+  await f.provider.close();
+});
+
+test("preserves a completed exclusive publication receipt when descriptor close fails", async () => {
+  const f = await fixture();
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  const output = join(f.root, "captures");
+  const destination = join(output, "screen.png");
+  let closeAttempts = 0;
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  vi.mocked(link).mockRejectedValueOnce(
+    Object.assign(new Error("hard links are unsupported"), { code: "EPERM" }),
+  );
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await actualFs.open(...args);
+    if (String(args[0]) !== destination) return handle;
+    return new Proxy(handle, {
+      get(target, property) {
+        if (property === "close")
+          return async () => {
+            closeAttempts += 1;
+            if (closeAttempts === 1)
+              throw new Error("controlled descriptor close fault");
+            await target.close();
+          };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  });
+  const result = await f.provider.execute({
+    operation: "capture_adb_screen",
+    input: { serial: "device", output_directory: output },
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected close failure");
+  expect(result.error.cleanupIncomplete).toBe(true);
+  expect(parseEvidence(result.error.partialObservation)).toMatchObject({
+    operation: "capture_adb_screen",
+    confidence: "observed",
+    normalized_result: { local_path: destination, bytes: f.png.byteLength },
+  });
+  expect(await readFile(destination)).toEqual(f.png);
+  expect(closeAttempts).toBe(2);
+  await f.provider.close();
+});
+
+test("retains incomplete cleanup on a cancelled capture while keeping cancellation typed", async () => {
+  const f = await fixture();
+  const runtime = await PrivateRuntimeRoot.create({
+    prefix: "rea-adb-cancel-",
+  });
+  const controller = new AbortController();
+  let closeAttempts = 0;
+  const provider = new AdbProvider({
+    environment: { REA_ADB_PATH: join(f.root, "adb") },
+    createRuntimeRoot: async () => {
+      controller.abort();
+      return {
+        path: runtime.path,
+        close: async () => {
+          closeAttempts += 1;
+          if (closeAttempts === 1) throw new Error("controlled cleanup fault");
+          await runtime.close();
+        },
+      };
+    },
+  });
+  vi.mocked(execFileBytes).mockResolvedValueOnce({
+    stdout: f.png,
+    stderr: Buffer.alloc(0),
+  });
+  const result = await provider.execute(
+    {
+      operation: "capture_adb_screen",
+      input: { serial: "device", output_directory: join(f.root, "cancelled") },
+    },
+    { signal: controller.signal },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected cancellation");
+  expect(result.error._tag).toBe("AnalysisCancelledError");
+  expect(result.error.cleanupIncomplete).toBe(true);
+  expect(result.error.cleanupResources).toContain(runtime.path);
+  await provider.close();
+  expect(closeAttempts).toBe(2);
 });

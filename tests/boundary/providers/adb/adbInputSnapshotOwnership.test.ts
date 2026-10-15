@@ -10,6 +10,7 @@ import {
 } from "../../../../src/process/ExecFileOutput.js";
 import { parseEvidence } from "../../../../src/domain/evidence.js";
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
+import { PrivateRuntimeRoot } from "../../../../src/process/PrivateRuntimeRoot.js";
 
 vi.mock(
   "../../../../src/process/ExecFileOutput.js",
@@ -130,6 +131,58 @@ test("retains failed snapshot cleanup ownership and retries it on close", async 
   await expect(lstat(dirname(f.snapshotPath()))).rejects.toMatchObject({
     code: "ENOENT",
   });
+});
+
+test("closes retained snapshot handles before removing their runtime root", async () => {
+  const f = await fixture();
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  let runtimePath = "";
+  let snapshotHandleOpen = false;
+  let closeAttempts = 0;
+  let rootClosedWithHandleOpen = false;
+  const runtime = await PrivateRuntimeRoot.create({ prefix: "rea-adb-order-" });
+  runtimePath = runtime.path;
+  const provider = new AdbProvider({
+    environment: { REA_ADB_PATH: join(f.root, "adb") },
+    createRuntimeRoot: async () => ({
+      path: runtime.path,
+      close: async () => {
+        if (snapshotHandleOpen) {
+          rootClosedWithHandleOpen = true;
+          throw new Error("runtime root removed while snapshot handle is open");
+        }
+        await runtime.close();
+      },
+    }),
+  });
+  const originalOpen = actualFs.open;
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const handle = await originalOpen(...args);
+    if (!String(args[0]).startsWith(`${runtimePath}/`)) return handle;
+    snapshotHandleOpen = true;
+    return new Proxy(handle, {
+      get(target, property) {
+        if (property === "close")
+          return async () => {
+            closeAttempts += 1;
+            if (closeAttempts === 1)
+              throw new Error("controlled handle close fault");
+            await target.close();
+            snapshotHandleOpen = false;
+          };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  });
+  const result = await provider.execute(f.request);
+  expect(result.ok).toBe(false);
+  expect(closeAttempts).toBe(2);
+  expect(rootClosedWithHandleOpen).toBe(false);
+  await provider.close();
 });
 
 test.each([
