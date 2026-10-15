@@ -505,6 +505,49 @@ describe("GhidraClient", () => {
 });
 
 describe("GhidraClient startup lifecycle", () => {
+  it("cancels a retry waiter without taking ownership of startup cleanup", async () => {
+    let markLaunchPending: (() => void) | undefined;
+    const launchPending = new Promise<void>((resolve) => {
+      markLaunchPending = resolve;
+    });
+    let releaseLaunch: (() => void) | undefined;
+    const launchGate = new Promise<void>((resolve) => {
+      releaseLaunch = resolve;
+    });
+    const launcher = new FixtureLauncher();
+    const client = clientFor({
+      async launch(session) {
+        markLaunchPending?.();
+        await launchGate;
+        return launcher.launch(session);
+      },
+    });
+    const firstController = new AbortController();
+    const first = client.start(firstController.signal);
+    await launchPending;
+    firstController.abort();
+
+    const retryController = new AbortController();
+    const retry = client.start(retryController.signal);
+    retryController.abort();
+    await expect(retry).resolves.toMatchObject({
+      ok: false,
+      error: { kind: "cancelled" },
+    });
+    releaseLaunch?.();
+    await expect(first).resolves.toMatchObject({
+      ok: false,
+      error: { kind: "cancelled" },
+    });
+    expect(launcher.processes).toHaveLength(1);
+    const child = launcher.processes[0];
+    if (child === undefined) throw new Error("fixture child was not launched");
+    await expect(waitForChildExit(child, 5_000)).resolves.toBe(true);
+    await expect(access(launcher.runtimeRoots[0] ?? "")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("applies one startup deadline and removes the private runtime", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const launcher = new FixtureLauncher("silent");
