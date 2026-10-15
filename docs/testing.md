@@ -243,6 +243,19 @@ remains owned, both failures survive, and a later close retries it. Include
 admission failure after opening the descriptor. If caller cancellation returns
 before an inspection settles, gate its final read or close and verify that
 session shutdown waits for the owned work and reports any retained resources.
+Gate a later read in a multi-read inspection, not only its first read. Overlap
+operations so one retains a failed descriptor while another reaches its next
+read; both the operation and shutdown must settle without nested-admission
+deadlock. Deny child close and verify its containing root survives until retry.
+
+Exercise publication on filesystems without hard links using an unsupported-link
+seam. Check exclusive destination creation, stat/write/close failures, completed
+output receipts, and cancellation at the documented cutoff. A streamed fallback
+has different visibility from an atomic hard-link commit and must report it
+accurately. For Windows command supervision, keep a descendant writing after its
+leader exits, deny cleanup observation, and verify a competing writer remains
+excluded until the exact Job Object closes. Portable doubles cover retry logic;
+the native Windows lane must establish actual process-tree behavior.
 
 When changing an internal helper contract, check its JavaScript verifier and
 subprocess-script consumers alongside TypeScript references. Source typecheck

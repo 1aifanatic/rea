@@ -107,6 +107,14 @@ providers need not expose identical state machines.
   close must retain the exact handle and preserve any earlier failure. If an
   abortable caller stops waiting, keep the underlying work in that owner's
   lifetime so shutdown cannot report release before finalization settles.
+  Admit the entire inspection once, including later reads and finalization.
+  Helpers must borrow that admission or use an operation child scope; re-entering
+  the same draining scope can make cleanup wait for its own caller.
+- Release child descriptors before removing their containing root. Retain a
+  composite owner when either stage fails so retry preserves that ordering.
+  A Windows command leader's exit does not establish Job Object closure. Keep
+  the process-tree observer and command lock alive through failed cleanup retries
+  until the owned tree's close event.
 
 Exercise the applicable [lifecycle regression scenarios](testing.md#lifecycle-regressions)
 through the producing owner and affected CLI/MCP consumers.
