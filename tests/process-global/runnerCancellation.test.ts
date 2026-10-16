@@ -574,18 +574,20 @@ function withTimeout<T>(
   ]).finally(() => clearTimeout(timeout));
 }
 
-it("retains lock ownership through a post-spawn child error until close", async () => {
-  const directory = await createTestTempDirectory("rea-runner-child-error-");
-  const readyPath = join(directory, "command-ready");
-  const gatePath = join(directory, "allow-command-exit");
-  const closedPath = join(directory, "command-closed");
-  const source = await readFile(supervisorPath, "utf8");
-  const crossSpawn = pathToFileURL(
-    createRequire(import.meta.url).resolve("cross-spawn"),
-  ).href;
-  const spawnCall =
-    /child = spawn\(command\[0\], command\.slice\(1\), \{\n\s+cwd: process\.cwd\(\),\n\s+env: process\.env,\n\s+stdio: "inherit",\n\s+\}\);/u;
-  const postSpawnInjection = `child.once("spawn", () => {
+it.runIf(process.platform !== "win32")(
+  "retains lock ownership through a post-spawn child error until close",
+  async () => {
+    const directory = await createTestTempDirectory("rea-runner-child-error-");
+    const readyPath = join(directory, "command-ready");
+    const gatePath = join(directory, "allow-command-exit");
+    const closedPath = join(directory, "command-closed");
+    const source = await readFile(supervisorPath, "utf8");
+    const crossSpawn = pathToFileURL(
+      createRequire(import.meta.url).resolve("cross-spawn"),
+    ).href;
+    const spawnCall =
+      /child = spawn\(command\[0\], command\.slice\(1\), \{\n\s+cwd: process\.cwd\(\),\n\s+env: process\.env,\n\s+stdio: "inherit",\n\s+\}\);/u;
+    const postSpawnInjection = `child.once("spawn", () => {
   const waitForReady = setInterval(() => {
     if (!existsSync(${JSON.stringify(readyPath)})) return;
     clearInterval(waitForReady);
@@ -594,25 +596,25 @@ it("retains lock ownership through a post-spawn child error until close", async 
     child.emit("error", new Error("controlled secondary child error"));
   }, 5);
 });`;
-  expect(source).toMatch(spawnCall);
-  const injectedSource = source
-    .replace(
-      'import spawn from "cross-spawn";',
-      `import spawn from ${JSON.stringify(crossSpawn)};\nimport { existsSync } from "node:fs";`,
-    )
-    .replace(spawnCall, (call) => `${call}\n    ${postSpawnInjection}`);
-  expect(injectedSource).toContain(postSpawnInjection);
-  expect(injectedSource).toContain("controlled post-spawn child error");
-  const copiedSupervisor = join(directory, "run-exclusive-command.mjs");
-  const copiedHelperDirectory = join(directory, "lib");
-  await mkdir(copiedHelperDirectory, { recursive: true });
-  await copyFile(
-    join(process.cwd(), "scripts/lib/windows-owned-command.mjs"),
-    join(copiedHelperDirectory, "windows-owned-command.mjs"),
-  );
-  await writeFile(copiedSupervisor, injectedSource);
+    expect(source).toMatch(spawnCall);
+    const injectedSource = source
+      .replace(
+        'import spawn from "cross-spawn";',
+        `import spawn from ${JSON.stringify(crossSpawn)};\nimport { existsSync } from "node:fs";`,
+      )
+      .replace(spawnCall, (call) => `${call}\n    ${postSpawnInjection}`);
+    expect(injectedSource).toContain(postSpawnInjection);
+    expect(injectedSource).toContain("controlled post-spawn child error");
+    const copiedSupervisor = join(directory, "run-exclusive-command.mjs");
+    const copiedHelperDirectory = join(directory, "lib");
+    await mkdir(copiedHelperDirectory, { recursive: true });
+    await copyFile(
+      join(process.cwd(), "scripts/lib/windows-owned-command.mjs"),
+      join(copiedHelperDirectory, "windows-owned-command.mjs"),
+    );
+    await writeFile(copiedSupervisor, injectedSource);
 
-  const gatedCommand = `
+    const gatedCommand = `
     const fs = require("node:fs");
     fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");
     process.stdout.write("command-ready\\n");
@@ -623,79 +625,80 @@ it("retains lock ownership through a post-spawn child error until close", async 
       process.stdout.write("command-closed\\n");
     }, 5);
   `;
-  const supervisor = spawn(
-    process.execPath,
-    [copiedSupervisor, "test", process.execPath, "-e", gatedCommand],
-    { cwd: directory, stdio: ["ignore", "pipe", "pipe", "ipc"] },
-  );
-  if (supervisor.stdout === null || supervisor.stderr === null) {
-    supervisor.kill("SIGKILL");
-    throw new Error("supervisor output pipes were not created");
-  }
-  const stdoutStream = supervisor.stdout;
-  const stderrStream = supervisor.stderr;
-  let stdout = "";
-  let stderr = "";
-  const outputWaiters = new Map<string, (() => void)[]>();
-  stdoutStream.on("data", (chunk) => {
-    stdout += chunk.toString();
-    for (const [marker, waiters] of outputWaiters) {
-      if (!stdout.includes(marker)) continue;
-      outputWaiters.delete(marker);
-      for (const notify of waiters) notify();
-    }
-  });
-  stderrStream.on("data", (chunk) => (stderr += chunk.toString()));
-  const waitForOutput = (marker: string) => {
-    if (stdout.includes(marker)) return Promise.resolve();
-    return withTimeout(
-      new Promise<void>((resolveOutput) => {
-        outputWaiters.set(marker, [
-          ...(outputWaiters.get(marker) ?? []),
-          resolveOutput,
-        ]);
-      }),
-      `supervisor did not write ${marker}`,
+    const supervisor = spawn(
+      process.execPath,
+      [copiedSupervisor, "test", process.execPath, "-e", gatedCommand],
+      { cwd: directory, stdio: ["ignore", "pipe", "pipe", "ipc"] },
     );
-  };
-  const exited = withTimeout(
-    new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolveExit, reject) => {
-        supervisor.once("error", reject);
-        supervisor.once("exit", (code, signal) =>
-          resolveExit({ code, signal }),
-        );
-      },
-    ),
-    "supervisor did not exit",
-  );
-  try {
-    await waitForOutput("controlled-post-spawn-error");
-    const contender = await execute(directory, process.execPath, [
-      "-e",
-      'process.stdout.write("lock acquired");',
-    ]);
-    expect(contender).toMatchObject({
-      code: 1,
-      stdout: "",
-      stderr: expect.stringContaining("already running"),
+    if (supervisor.stdout === null || supervisor.stderr === null) {
+      supervisor.kill("SIGKILL");
+      throw new Error("supervisor output pipes were not created");
+    }
+    const stdoutStream = supervisor.stdout;
+    const stderrStream = supervisor.stderr;
+    let stdout = "";
+    let stderr = "";
+    const outputWaiters = new Map<string, (() => void)[]>();
+    stdoutStream.on("data", (chunk) => {
+      stdout += chunk.toString();
+      for (const [marker, waiters] of outputWaiters) {
+        if (!stdout.includes(marker)) continue;
+        outputWaiters.delete(marker);
+        for (const notify of waiters) notify();
+      }
     });
-    expect(stdout).not.toContain("command-closed");
-
-    await writeFile(gatePath, "open");
-    await waitForOutput("command-closed");
-    expect(await exited).toEqual({ code: 1, signal: null });
-    expect(stderr).toContain("controlled post-spawn child error");
-    expect(stderr).not.toContain("controlled secondary child error");
-    expect(
-      await execute(directory, process.execPath, [
+    stderrStream.on("data", (chunk) => (stderr += chunk.toString()));
+    const waitForOutput = (marker: string) => {
+      if (stdout.includes(marker)) return Promise.resolve();
+      return withTimeout(
+        new Promise<void>((resolveOutput) => {
+          outputWaiters.set(marker, [
+            ...(outputWaiters.get(marker) ?? []),
+            resolveOutput,
+          ]);
+        }),
+        `supervisor did not write ${marker}`,
+      );
+    };
+    const exited = withTimeout(
+      new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+        (resolveExit, reject) => {
+          supervisor.once("error", reject);
+          supervisor.once("exit", (code, signal) =>
+            resolveExit({ code, signal }),
+          );
+        },
+      ),
+      "supervisor did not exit",
+    );
+    try {
+      await waitForOutput("controlled-post-spawn-error");
+      const contender = await execute(directory, process.execPath, [
         "-e",
         'process.stdout.write("lock acquired");',
-      ]),
-    ).toMatchObject({ code: 0, stdout: "lock acquired" });
-  } finally {
-    await writeFile(gatePath, "open");
-    await waitForOutput("command-closed").catch(() => undefined);
-    await exited.catch(() => undefined);
-  }
-});
+      ]);
+      expect(contender).toMatchObject({
+        code: 1,
+        stdout: "",
+        stderr: expect.stringContaining("already running"),
+      });
+      expect(stdout).not.toContain("command-closed");
+
+      await writeFile(gatePath, "open");
+      await waitForOutput("command-closed");
+      expect(await exited).toEqual({ code: 1, signal: null });
+      expect(stderr).toContain("controlled post-spawn child error");
+      expect(stderr).not.toContain("controlled secondary child error");
+      expect(
+        await execute(directory, process.execPath, [
+          "-e",
+          'process.stdout.write("lock acquired");',
+        ]),
+      ).toMatchObject({ code: 0, stdout: "lock acquired" });
+    } finally {
+      await writeFile(gatePath, "open");
+      await waitForOutput("command-closed").catch(() => undefined);
+      await exited.catch(() => undefined);
+    }
+  },
+);
