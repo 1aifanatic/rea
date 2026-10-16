@@ -43,9 +43,38 @@ it("retains a failed input hash descriptor until provider shutdown retries it", 
     expect(close).toHaveBeenCalledTimes(2);
     expect(owners).toHaveLength(2);
     expect(owners[0]).toBe(owners[1]);
+    if (result.ok) throw new Error("Expected incomplete hash cleanup");
+    expect(result.error.cause).toBeInstanceOf(AggregateError);
     await provider.close();
     expect(close).toHaveBeenCalledTimes(3);
     expect(owners[0]!.handle.fd).toBe(-1);
+    expect(launches).toHaveLength(0);
+  } finally {
+    close.mockRestore();
+    await provider.close();
+    await verifyCleanup(launches);
+  }
+});
+
+it("clears hash cleanup uncertainty when the provider immediately retries the same handle", async () => {
+  const { service, apk, provider, launches } = await setup();
+  const closeCause = new Error("fixture source hash close unavailable");
+  const originalClose = OwnedFileHandle.prototype.close;
+  const close = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockRejectedValueOnce(closeCause)
+    .mockImplementation(async function (this: OwnedFileHandle) {
+      return originalClose.call(this);
+    });
+  try {
+    const result = await service.execute("inspect_android_package", {
+      path: apk,
+    });
+    expect(result).toMatchObject({ ok: false });
+    if (result.ok) throw new Error("Expected the hash close failure");
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(result.error.cleanupIncomplete).toBe(false);
+    expect(result.error.cause).toBeInstanceOf(AggregateError);
     expect(launches).toHaveLength(0);
   } finally {
     close.mockRestore();

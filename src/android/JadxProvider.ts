@@ -74,13 +74,9 @@ const executionError = (context: {
       cause.outcome.kind === "failed" ? cause.outcome.cause : undefined;
     const primary =
       signal?.aborted === true
-        ? new AnalysisCancelledError(request.operation, {
-            ...(primaryCause === undefined ? {} : { cause: primaryCause }),
-          })
+        ? new AnalysisCancelledError(request.operation, (primaryCause === undefined ? {} : { cause: primaryCause }))
         : timeout.aborted
-          ? new AnalysisTimeoutError(request.operation, OPERATION_TIMEOUT_MS, {
-              ...(primaryCause === undefined ? {} : { cause: primaryCause }),
-            })
+          ? new AnalysisTimeoutError(request.operation, OPERATION_TIMEOUT_MS, (primaryCause === undefined ? {} : { cause: primaryCause }))
           : primaryCause instanceof AnalysisError
             ? primaryCause
             : new ProviderAdapterError("jadx", request.operation, {
@@ -229,6 +225,11 @@ const cleanup = async (
   for (const { path, owner } of resources.fileHandles) {
     try {
       await owner.close();
+      if (
+        resources.operationCause instanceof RegularFileCleanupFailure &&
+        resources.operationCause.owner === owner
+      )
+        previousError?.resolveCleanup();
     } catch (cause: unknown) {
       failedHandles.push({ path, owner, cause });
     }
