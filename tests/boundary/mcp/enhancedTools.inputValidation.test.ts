@@ -1,3 +1,4 @@
+import { EnhancedTools } from "../../../src/application/EnhancedTools.js";
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -44,5 +45,34 @@ describe("enhanced MCP input validation", () => {
     expect(text?.type === "text" ? text.text : "").toBe(
       JSON.stringify(parseMcpToolError(result)),
     );
+  });
+
+  it("rejects undeclared properties on direct get_objc_protocols execution", async () => {
+    let calls = 0;
+    const tools = new EnhancedTools({
+      execute: async () => {
+        calls++;
+        return ok([]);
+      },
+    });
+
+    const invalid = await tools.execute("get_objc_protocols", {
+      unexpected: true,
+    });
+    expect(invalid).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "AnalysisInputError",
+        operation: "get_objc_protocols",
+      },
+    });
+    expect(calls).toBe(0);
+
+    const valid = await tools.execute("get_objc_protocols", {});
+    expect(valid).toMatchObject({
+      ok: true,
+      value: { count: 0, protocols: [] },
+    });
+    expect(calls).toBe(1);
   });
 });
