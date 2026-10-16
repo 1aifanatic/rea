@@ -15,15 +15,20 @@ import {
 } from "../domain/analysisProfile.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { err, ok } from "../domain/result.js";
-import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
-import type { KunaProcessLauncher } from "./KunaCommand.js";
+import {
+  kunaFileCleanupError,
+  type KunaProcessLauncher,
+} from "./KunaCommand.js";
 import {
   readKunaConfiguration,
   type KunaConfiguration,
 } from "./KunaConfiguration.js";
-import { inspectKunaInstallation } from "./KunaInstallation.js";
+import {
+  createKunaFileCloseScope,
+  inspectKunaInstallation,
+} from "./KunaInstallation.js";
 import { KunaProjectCache } from "./KunaProjectCache.js";
 import {
   KUNA_PROVIDER_IDENTITY,
@@ -173,22 +178,22 @@ export class KunaProvider implements AnalysisProviderCandidate {
           "Kuna profile inspection requires a durable file resource owner",
         ),
       );
+    const fileCloseScope = createKunaFileCloseScope(fileCloseResources);
     try {
       installation = await inspectKunaInstallation(this.#environment, {
         platform: this.#platform,
         ...(options?.signal === undefined ? {} : { signal: options.signal }),
-        fileCloseResources,
+        fileCloseResources: fileCloseScope.owner,
       });
     } catch (cause: unknown) {
       if (!(cause instanceof RegularFileCleanupFailure)) throw cause;
-      return err(
-        new ProviderCleanupError(
-          KUNA_PROVIDER_ID,
-          [cause.path],
-          { reason: String(cause.cleanupCause) },
-          { cause, operation: "kuna:profile" },
-        ),
+      const error = kunaFileCleanupError(
+        cause,
+        "kuna:profile",
+        options?.signal,
       );
+      fileCloseScope.bindFailure(cause, error);
+      return err(error);
     }
     if (!installation.ok)
       return err(kunaUnavailable("open_binary", installation.error.reason));

@@ -10,7 +10,11 @@ export const withKunaFileCloseOwner = async <T>(
   const scope = new ArtifactResourceScope();
   const owner: FileCloseResourceOwner = {
     retain: (handle, resource) =>
-      scope.retain({ kind: "file-handle", resource, handle }),
+      scope.retain({
+        kind: "lease",
+        resource,
+        lease: { release: () => handle.close() },
+      }),
     run: (work) => scope.run(work),
   };
   try {

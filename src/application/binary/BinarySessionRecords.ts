@@ -61,9 +61,9 @@ export abstract class BinarySessionRecords {
   protected readonly fileCloseResourceOwner: FileCloseResourceOwner = {
     retain: (owner, resource) =>
       this.#fileCloseResources.retain({
-        kind: "file-handle",
+        kind: "lease",
         resource,
-        handle: owner,
+        lease: { release: () => owner.close() },
       }),
     run: (operation) => this.#fileCloseResources.run(operation),
   };

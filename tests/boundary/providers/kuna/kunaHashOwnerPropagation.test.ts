@@ -441,6 +441,41 @@ it.skipIf(process.platform === "win32")(
   },
 );
 
+it
+  .skipIf(process.platform === "win32")
+  .each([{ stage: "fingerprint" }, { stage: "shebang" }] as const)(
+  "resolves the Kuna profile cleanup error after its $stage descriptor closes",
+  async ({ stage }) => {
+    const fixture = await session("rea-kuna-profile-owner-resolution-");
+    const binary = composeBinarySession(
+      new AnalysisProviderRegistry([fixture.provider]),
+    );
+    injected.closeCalls = 0;
+    injected.failCloseReadStage = stage;
+    try {
+      const resolved = await binary.previewTarget(fixture.target);
+      expect(resolved.ok).toBe(false);
+      if (resolved.ok)
+        throw new Error("Kuna profile inspection unexpectedly passed");
+      const originatingError = resolved.error;
+      expect(originatingError).toMatchObject({
+        cleanupIncomplete: true,
+        cleanupResources: [fixture.kuna],
+      });
+      expect(binary.status()).toMatchObject({ cleanup_pending: true });
+
+      expect(await binary.close()).toEqual({ ok: true, value: null });
+      expect(originatingError.cleanupIncomplete).toBe(false);
+      expect(injected.closeCalls).toBe(stage === "fingerprint" ? 2 : 3);
+      expect(binary.status()).toMatchObject({ cleanup_pending: false });
+    } finally {
+      injected.failCloseReadStage = undefined;
+      const closed = await binary.close();
+      if (!closed.ok) throw closed.error;
+    }
+  },
+);
+
 it.skipIf(process.platform === "win32")(
   "drains a Kuna candidate's retained hash owner when the binary session closes without an active client",
   async () => {
@@ -490,7 +525,11 @@ it.skipIf(process.platform === "win32")(
     const resources = new ArtifactResourceScope();
     const fileCloseResources: FileCloseResourceOwner = {
       retain: (owner, resource) =>
-        resources.retain({ kind: "file-handle", handle: owner, resource }),
+        resources.retain({
+          kind: "lease",
+          resource,
+          lease: { release: () => owner.close() },
+        }),
       run: (operation) => resources.run(operation),
     };
     try {

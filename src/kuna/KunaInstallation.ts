@@ -3,7 +3,9 @@ import { access, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { JsonValue } from "../domain/jsonValue.js";
+import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
 import { hashStableFile } from "../filesystem/StableFileHash.js";
 import type { FileCloseResourceOwner } from "../application/AnalysisProvider.js";
 import {
@@ -67,6 +69,34 @@ export interface KunaInstallationOptions {
   readonly probeTimeoutMs?: number;
   readonly fileCloseResources: FileCloseResourceOwner;
 }
+
+/** One installation inspection's file owners and their originating errors. */
+export interface KunaFileCloseScope {
+  readonly owner: FileCloseResourceOwner;
+  bindFailure(failure: RegularFileCleanupFailure, error: AnalysisError): void;
+}
+
+/** Adapt retained descriptor owners into leases and bind errors to exact owners. */
+export const createKunaFileCloseScope = (
+  parent: FileCloseResourceOwner,
+): KunaFileCloseScope => {
+  const leases = new Map<
+    Parameters<FileCloseResourceOwner["retain"]>[0],
+    AnalysisCleanupLease
+  >();
+  return {
+    owner: {
+      retain: (owner, resource) => {
+        const lease = new AnalysisCleanupLease(() => owner.close());
+        leases.set(owner, lease);
+        parent.retain({ close: () => lease.release() }, resource);
+      },
+      run: (operation) => parent.run(operation),
+    },
+    bindFailure: (failure, error) =>
+      leases.get(failure.owner)?.bindCleanupError(error),
+  };
+};
 
 /**
  * Environment for every Kuna child. Kuna unpacks its built-in SLEIGH tree into

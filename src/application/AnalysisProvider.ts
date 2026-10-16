@@ -7,7 +7,6 @@ import type { ManagedToolName } from "../contracts/managed/managedToolContracts.
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import type { AnalysisProfileCommitment } from "../domain/analysisProfile.js";
 import type { JsonValue } from "../domain/jsonValue.js";
-import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import type { Result } from "../domain/result.js";
 import type { EvidenceLocation } from "../domain/evidence.js";
 import type { EvidenceSubjectTarget } from "../domain/evidence.js";
@@ -176,7 +175,7 @@ export interface AnalysisClientContext {
 
 /** One lifecycle owner for descriptor cleanup and abortable inspection work. */
 export interface FileCloseResourceOwner {
-  retain(owner: OwnedFileHandle, resource: string): void;
+  retain(owner: { close(): Promise<void> }, resource: string): void;
   run<T>(operation: () => Promise<T>): Promise<T>;
 }
 

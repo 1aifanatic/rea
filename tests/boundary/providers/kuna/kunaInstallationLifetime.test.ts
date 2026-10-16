@@ -86,7 +86,11 @@ it.skipIf(process.platform === "win32")(
     const scope = new ArtifactResourceScope();
     const fileCloseResources: FileCloseResourceOwner = {
       retain: (owner, resource) =>
-        scope.retain({ kind: "file-handle", handle: owner, resource }),
+        scope.retain({
+          kind: "lease",
+          resource,
+          lease: { release: () => owner.close() },
+        }),
       run: (operation) => scope.run(operation),
     };
     const controller = new AbortController();

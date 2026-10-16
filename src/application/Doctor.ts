@@ -457,7 +457,11 @@ export const systemDoctorHost = (
   const commandEnvironment = { env: environment };
   const fileCloseResources: FileCloseResourceOwner = {
     retain: (owner, resource) =>
-      resources.retain({ kind: "file-handle", resource, handle: owner }),
+      resources.retain({
+        kind: "lease",
+        resource,
+        lease: { release: () => owner.close() },
+      }),
     run: (operation) => resources.run(operation),
   };
   return {
