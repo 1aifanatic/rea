@@ -13,6 +13,7 @@ export const associateWasmGlue = (
   // leaves reference coordinates intact: all code starts on a later line.
   const file = parseJavaScriptSource(
     source.startsWith("\uFEFF#!") ? source.slice(1) : source,
+    path,
   );
   const references: {
     value: string;
