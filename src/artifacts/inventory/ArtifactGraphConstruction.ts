@@ -302,7 +302,13 @@ export const createArtifactEdges = (
       ? occurrence.logical_path.slice(0, -".map".length)
       : undefined;
     const sourceCandidates =
-      sourcePath === undefined ? [] : (byPath.get(sourcePath) ?? []);
+      sourcePath === undefined
+        ? []
+        : (byPath.get(sourcePath) ?? []).filter(
+            (candidate) =>
+              candidate.entry_kind !== "directory" &&
+              candidate.artifact_kind !== "container",
+          );
     const mappedSource =
       sourceCandidates.length === 1 && sourceCandidates[0]?.artifact_id !== null
         ? sourceCandidates[0]
