@@ -130,4 +130,37 @@ describe("native addon loader provenance", () => {
       ]);
     },
   );
+
+  it("ignores local .require method calls and shadowed require bindings while retaining proven loaders", () => {
+    const analysis = analyzeJavaScriptStaticSource(`
+      const helper = { require: () => ({ ok: true }) };
+      const localMethod = helper.require("./fake.node");
+      module.exports.reexportedMethod = helper.require("./fake.node");
+      function shadowed(require, __webpack_require__) {
+        const localParam = require("./fake.node");
+        const localBundlerParam = __webpack_require__("./fake.node");
+        return [localParam, localBundlerParam];
+      }
+      const realAddon = require("./real.node");
+      globalThis.webpackChunkApp.push([[1], {
+        "factory": function (module, exports, __webpack_require__) {
+          const bundledAddon = __webpack_require__("./bundled.node");
+          return bundledAddon;
+        }
+      }]);
+    `);
+    expect(analysis.electron.native_addon_bindings).toEqual([
+      expect.objectContaining({
+        specifier: "./real.node",
+        binding_kind: "require",
+        module_kind: "require",
+      }),
+      expect.objectContaining({
+        specifier: "./bundled.node",
+        binding_kind: "require",
+        module_kind: "require",
+        module_key: "factory",
+      }),
+    ]);
+  });
 });
