@@ -141,7 +141,7 @@ test("closes retained snapshot handles before removing their runtime root", asyn
     );
   let runtimePath = "";
   let snapshotHandleOpen = false;
-  let closeAttempts = 0;
+  const closeAttempts = new Map<string, number>();
   let rootClosedWithHandleOpen = false;
   const runtime = await PrivateRuntimeRoot.create({ prefix: "rea-adb-order-" });
   runtimePath = runtime.path;
@@ -161,17 +161,21 @@ test("closes retained snapshot handles before removing their runtime root", asyn
   const originalOpen = actualFs.open;
   vi.mocked(open).mockImplementation(async (...args) => {
     const handle = await originalOpen(...args);
-    if (!String(args[0]).startsWith(`${runtimePath}/`)) return handle;
-    snapshotHandleOpen = true;
+    const path = String(args[0]);
+    const isSource = path === f.source;
+    const isSnapshot = path.startsWith(`${runtimePath}/`);
+    if (!isSource && !isSnapshot) return handle;
+    if (isSnapshot) snapshotHandleOpen = true;
     return new Proxy(handle, {
       get(target, property) {
         if (property === "close")
           return async () => {
-            closeAttempts += 1;
-            if (closeAttempts === 1)
+            const attempts = (closeAttempts.get(path) ?? 0) + 1;
+            closeAttempts.set(path, attempts);
+            if (attempts === 1)
               throw new Error("controlled handle close fault");
             await target.close();
-            snapshotHandleOpen = false;
+            if (isSnapshot) snapshotHandleOpen = false;
           };
         const value = Reflect.get(target, property, target) as unknown;
         return typeof value === "function" ? value.bind(target) : value;
@@ -180,8 +184,16 @@ test("closes retained snapshot handles before removing their runtime root", asyn
   });
   const result = await provider.execute(f.request);
   expect(result.ok).toBe(false);
-  expect(closeAttempts).toBe(2);
+  expect(closeAttempts.get(f.source)).toBe(2);
+  expect(closeAttempts.get(join(runtimePath, "payload.bin"))).toBe(2);
   expect(rootClosedWithHandleOpen).toBe(false);
+  if (!result.ok) {
+    // Both close owners failed in the snapshot boundary and recovered in the
+    // immediate runtime-root drain. Their old cleanup flags must not survive.
+    expect(result.error.cleanupIncomplete).toBe(false);
+    expect(result.error.cleanupResources).toEqual([]);
+    expect(result.error.cause).toBeDefined();
+  }
   await provider.close();
 });
 
@@ -263,8 +275,10 @@ test.each([
       },
     });
     await expect(readFile(localPath)).resolves.toEqual(pulledBytes);
+    const originatingError = result.error;
     await f.provider.close();
     expect(closeAttempts).toBe(2);
+    expect(originatingError.cleanupIncomplete).toBe(false);
   },
 );
 
@@ -358,6 +372,56 @@ test("package pull keeps earlier and completed artifacts when the digest handle 
   });
   await f.provider.close();
   expect(closeAttempts).toBe(2);
+});
+
+test("resolves package-directory cleanup on the originating pull error", async () => {
+  const f = await fixture();
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  const outputDirectory = join(f.root, "package-cleanup-output");
+  const packageDirectory = join(outputDirectory, "com.example.app");
+  let removeAttempts = 0;
+  vi.mocked(execFileBytes).mockImplementation(async (_binary, args) => {
+    if (args.includes("path"))
+      return {
+        stdout: Buffer.from("package:/data/app/com.example.app/base.apk\n"),
+        stderr: Buffer.alloc(0),
+      };
+    if (args[2] === "pull") throw new Error("controlled ADB pull failure");
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  });
+  vi.mocked(rm).mockImplementation(async (path, options) => {
+    if (String(path) === packageDirectory && ++removeAttempts === 1)
+      throw new Error("controlled package directory removal failure");
+    return actualFs.rm(path, options);
+  });
+
+  const result = await f.provider.execute({
+    operation: "pull_adb_package",
+    input: {
+      serial: "device",
+      package: "com.example.app",
+      output_directory: outputDirectory,
+    },
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected pull and cleanup failure");
+  expect(result.error.cleanupIncomplete).toBe(true);
+  expect(result.error.cleanupResources).toContain(packageDirectory);
+  expect(result.error.cause).toBeDefined();
+  const originatingError = result.error;
+  expect(removeAttempts).toBe(1);
+
+  await f.provider.close();
+  expect(removeAttempts).toBe(2);
+  expect(originatingError.cleanupIncomplete).toBe(false);
+  await f.provider.close();
+  expect(removeAttempts).toBe(2);
+  await expect(lstat(packageDirectory)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
 });
 
 test.each([false, true])(

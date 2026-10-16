@@ -360,6 +360,7 @@ test("closes and retains ownership when exclusive output stat fails", async () =
   await f.provider.close();
   expect(statAttempts).toBe(3);
   expect(closeAttempts).toBe(1);
+  expect(result.error.cleanupIncomplete).toBe(false);
   await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
@@ -415,7 +416,8 @@ test("waits for descriptor close before rolling back an incomplete exclusive out
   });
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("expected write failure");
-  expect(result.error.cleanupIncomplete).toBe(true);
+  expect(result.error.cleanupIncomplete).toBe(false);
+  expect(result.error.cause).toBeInstanceOf(AggregateError);
   expect(result.error.cleanupResources).toContain(destination);
   expect(closeAttempts).toBe(2);
   expect(removeWhileOpen).toEqual([]);
