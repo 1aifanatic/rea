@@ -664,15 +664,20 @@ const isPatternNode = (node: t.Node): boolean =>
   t.isObjectPattern(node) ||
   t.isArrayPattern(node) ||
   t.isAssignmentPattern(node) ||
-  t.isRestElement(node);
+  t.isRestElement(node) ||
+  t.isTSParameterProperty(node);
 
 const isDeleteSite = (site: t.Node): boolean =>
   t.isUnaryExpression(site, { operator: "delete" });
 
 const isPatternOwnerDeclaration = (node: t.Node): boolean =>
+  t.isTSParameterProperty(node) ||
   (t.isVariableDeclarator(node) && t.isPattern(node.id)) ||
   (t.isFunction(node) &&
-    node.params.some((value): value is t.Pattern => t.isPattern(value))) ||
+    node.params.some(
+      (value): value is t.Pattern =>
+        t.isPattern(value) || t.isTSParameterProperty(value),
+    )) ||
   (t.isCatchClause(node) && node.param !== null && t.isPattern(node.param));
 
 /** Classify one identifier occurrence consistently with semantic references. */
@@ -698,6 +703,8 @@ const isDeclarationIdentifier = (
   parent: t.Node,
 ): boolean => {
   if (t.isTSImportEqualsDeclaration(parent)) return parent.id === node;
+  if (t.isTSParameterProperty(parent))
+    return patternContains(parent.parameter, node);
   return (
     (t.isVariableDeclarator(parent) && patternContains(parent.id, node)) ||
     ((t.isFunctionDeclaration(parent) || t.isFunctionExpression(parent)) &&
@@ -747,6 +754,8 @@ const patternNames = (pattern: t.Node): string[] => {
 
 const patternContains = (pattern: t.Node, target: t.Identifier): boolean =>
   pattern === target ||
+  (t.isTSParameterProperty(pattern) &&
+    patternContains(pattern.parameter, target)) ||
   (t.isAssignmentPattern(pattern) && patternContains(pattern.left, target)) ||
   (t.isRestElement(pattern) && patternContains(pattern.argument, target)) ||
   (t.isObjectPattern(pattern) &&

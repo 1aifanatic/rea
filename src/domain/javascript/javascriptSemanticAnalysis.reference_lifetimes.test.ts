@@ -664,4 +664,24 @@ describe("references captured before an intermediate rebind", () => {
       ).toEqual({ status: "literal", value: 1 });
     },
   );
+
+  it.each([
+    ["class C { constructor(public x: number) {} }", "x", 0],
+    ["class C { constructor(public x = 1) {} }", "x", 0],
+    ["class C { constructor(x: number) {} }", "x", 0],
+    ["class C { constructor(x: number) { console.log(x); } }", "x", 1],
+    ["const seed = 1; class C { constructor(public x = seed) {} }", "seed", 1],
+  ] as const)(
+    "does not emit identifier reads for parameter property declarations in %s",
+    (source, identifierName, expectedCount) => {
+      const ir = analyzeJavaScriptSemantics(source);
+      const references = ir.references.filter(
+        (ref) => ref.name === identifierName,
+      );
+      expect(references).toHaveLength(expectedCount);
+      if (expectedCount > 0) {
+        expect(references.every((ref) => ref.role === "read")).toBe(true);
+      }
+    },
+  );
 });
