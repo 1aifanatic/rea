@@ -1466,7 +1466,7 @@ const waitForCommandFrames = async (
     const frame = received.text;
     const markerIndex = frame.indexOf(marker);
     if (markerIndex >= 0) {
-      const beforeMarker = frame.slice(0, markerIndex).trimEnd();
+      const beforeMarker = frame.slice(0, markerIndex);
       if (beforeMarker.length > 0) {
         const beforeMarkerBytes = Buffer.byteLength(beforeMarker, "utf8");
         const separatorBytes = output.length > 0 ? 1 : 0;
