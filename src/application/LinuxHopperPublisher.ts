@@ -1083,22 +1083,28 @@ const releaseFailure = (
   cause: unknown,
   signal: AbortSignal | undefined,
   fallback: HopperReleaseError["reason"],
-): HopperReleaseError =>
-  cause instanceof HopperReleaseError && cause.reason === "cleanup_failed"
-    ? cause
-    : signal?.aborted === true
-      ? new HopperReleaseError(
-          "cancelled",
-          "Hopper publisher verification was cancelled.",
-          { cause },
-        )
-      : cause instanceof HopperReleaseError
-        ? cause
-        : new HopperReleaseError(
-            fallback,
-            "Hopper publisher verification could not complete.",
-            { cause },
-          );
+): HopperReleaseError => {
+  if (cause instanceof HopperReleaseError && cause.reason === "cleanup_failed")
+    return cause;
+  if (cause instanceof ArtifactReaderFailure && cause.cleanup !== undefined)
+    return new HopperReleaseError(
+      "cleanup_failed",
+      "Hopper publisher cleanup remains incomplete.",
+      { cause },
+    );
+  if (signal?.aborted === true)
+    return new HopperReleaseError(
+      "cancelled",
+      "Hopper publisher verification was cancelled.",
+      { cause },
+    );
+  if (cause instanceof HopperReleaseError) return cause;
+  return new HopperReleaseError(
+    fallback,
+    "Hopper publisher verification could not complete.",
+    { cause },
+  );
+};
 const launcherIdentity = (
   verified: VerifiedLinuxHopperPackage,
   source: VerifiedLinuxHopperLauncher["source"],

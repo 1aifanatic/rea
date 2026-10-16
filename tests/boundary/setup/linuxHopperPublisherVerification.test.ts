@@ -802,6 +802,56 @@ linux("retains and retries failed verification cleanup", async () => {
   }
 });
 
+portableTar(
+  "reports pending publisher cleanup as a typed failure before retrying the operation",
+  async () => {
+    const f = await fixture("arch");
+    admitFixturePublisher(f.fingerprint);
+    const closeRoot = PrivateRuntimeRoot.prototype.close;
+    let rootCloseAttempts = 0;
+    vi.spyOn(PrivateRuntimeRoot.prototype, "close").mockImplementation(
+      async function (this: PrivateRuntimeRoot) {
+        rootCloseAttempts += 1;
+        if (rootCloseAttempts < 3)
+          throw new Error("Fixture cleanup remains unavailable");
+        return await closeRoot.apply(this);
+      },
+    );
+    try {
+      expect(
+        await f.publisher.verifyArchive(
+          "arch",
+          f.release,
+          f.archive,
+          undefined,
+          f.publicKey,
+        ),
+      ).toMatchObject({ ok: false, error: { reason: "cleanup_failed" } });
+
+      const closeHandle = vi.spyOn(OwnedFileHandle.prototype, "close");
+      expect(await f.publisher.inspectLauncher(f.launcher)).toMatchObject({
+        ok: false,
+        error: { reason: "cleanup_failed" },
+      });
+      expect(closeHandle).not.toHaveBeenCalled();
+
+      expect(
+        await f.publisher.verifyArchive(
+          "arch",
+          f.release,
+          f.archive,
+          undefined,
+          f.publicKey,
+        ),
+      ).toMatchObject({ ok: true });
+      expect(closeHandle).toHaveBeenCalled();
+      expect(rootCloseAttempts).toBe(4);
+    } finally {
+      await f.publisher.close();
+    }
+  },
+);
+
 linux(
   "retains and retries a launcher hash descriptor after close failure",
   async () => {
