@@ -516,8 +516,6 @@ export class PcapProvider {
                 request.operation,
               ),
             );
-      if (!result.ok && result.error.cleanupIncomplete)
-        this.snapshotFailures.set(snapshot, result.error);
     }
     if (
       snapshot !== undefined &&
@@ -552,8 +550,14 @@ export class PcapProvider {
         },
       );
       result = err(cleanupFailure);
-      this.snapshotFailures.set(snapshot, cleanupFailure);
     }
+    if (
+      snapshot !== undefined &&
+      this.snapshots.has(snapshot) &&
+      !result.ok &&
+      result.error.cleanupIncomplete
+    )
+      this.snapshotFailures.set(snapshot, result.error);
     return result;
   }
 
