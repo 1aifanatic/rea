@@ -604,6 +604,42 @@ describe("managed exception region prefix boundaries", () => {
       });
     },
   );
+
+  it("marks a method body ending in a CIL prefix opcode as malformed", () => {
+    const bytes = buildManagedPeFixture({
+      ilBody: Buffer.from([(2 << 2) | 2, 0xfe, 0x13]),
+    });
+    const result = inspectManagedMembersBytes(
+      bytes,
+      managedPeFixtureTarget(bytes),
+    );
+    const body = result.methods[0]!.body;
+    expect(body).toMatchObject({
+      status: "malformed",
+      normalized_il_sha256: null,
+      issue:
+        "CIL prefix opcode at IL offset 0 leaves method body without a prefixed instruction",
+      decoded_instruction_count: 1,
+    });
+    expect(result.coverage.state).toBe("partial");
+
+    const precededBytes = buildManagedPeFixture({
+      ilBody: Buffer.from([(3 << 2) | 2, 0x00, 0xfe, 0x13]),
+    });
+    const precededResult = inspectManagedMembersBytes(
+      precededBytes,
+      managedPeFixtureTarget(precededBytes),
+    );
+    const precededBody = precededResult.methods[0]!.body;
+    expect(precededBody).toMatchObject({
+      status: "malformed",
+      normalized_il_sha256: null,
+      issue:
+        "CIL prefix opcode at IL offset 1 leaves method body without a prefixed instruction",
+      decoded_instruction_count: 2,
+    });
+    expect(precededResult.coverage.state).toBe("partial");
+  });
 });
 
 describe("managed exception region flags and filters", () => {
