@@ -347,3 +347,22 @@ it("matches a CLI-selected ./ module exactly against its glue reference", () => 
     },
   ]);
 });
+
+it("parses valid JavaScript glue containing conditional arrow functions", () => {
+  const source = [
+    "const fn = c ? x => (a) : y => (b);",
+    'fetch("./module.wasm");',
+  ].join("\n");
+  const candidates = ["/app/module.wasm"];
+  const result = associateWasmGlue(source, "/app/glue.js", candidates);
+  expect(result.parse_status).toBe("complete");
+  expect(result.references).toMatchObject([
+    {
+      value: "./module.wasm",
+      line: 2,
+      column: 6,
+      association: "local-path-candidate",
+      candidate_paths: candidates,
+    },
+  ]);
+});
