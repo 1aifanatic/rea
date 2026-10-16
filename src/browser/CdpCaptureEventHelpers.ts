@@ -107,6 +107,13 @@ export const consolePrimitive = (
         : undefined;
     case "undefined":
       return { type, text: "undefined" };
+    case "null":
+      return { type: "null", text: "null" };
+    case "object":
+      return cdpStringValue(value.subtype) === "null" &&
+        (value.value === null || value.value === undefined)
+        ? { type: "null", text: "null" }
+        : undefined;
     default:
       return undefined;
   }
