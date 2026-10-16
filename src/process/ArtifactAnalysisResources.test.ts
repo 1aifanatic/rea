@@ -314,6 +314,10 @@ it("keeps a runtime root until its descriptor cleanup owner is released", async 
 
   if (outer.ok) throw new Error("expected combined cleanup failure");
   expect(rootCloses).toBe(0);
+  expect(outer.error.cleanupResources).toEqual([
+    "fixture descriptor",
+    "runtime-root",
+  ]);
   expect(outer.error.cause).toBeInstanceOf(AggregateError);
   expect((outer.error.cause as AggregateError).errors[0]).toBe(first.error);
   expect(first.error.cleanupIncomplete).toBe(true);

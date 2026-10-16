@@ -307,7 +307,14 @@ export class ArtifactAnalysisResources {
         cause instanceof ProviderCleanupError ? cause.diagnostics : undefined;
       const cleanupFailure = new ProviderCleanupError(
         this.providerId,
-        this.#pendingResources,
+        [
+          ...new Set([
+            ...(!result.ok && result.error.cleanupIncomplete
+              ? result.error.cleanupResources
+              : []),
+            ...this.#pendingResources,
+          ]),
+        ],
         {
           ...cleanupDiagnostics,
           reason:
