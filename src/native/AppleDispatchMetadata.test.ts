@@ -519,6 +519,100 @@ describe("malformed Apple dispatch metadata", () => {
     ).toMatchObject({ status: "partial", examined: 3 });
   });
 
+  it("retains valid Swift class vtable siblings when one class has an empty owner name", () => {
+    const swiftVtableFixture = (mode: "valid" | "empty" | "unmapped") => {
+      const b = Buffer.alloc(4096),
+        base = 0x100000000n;
+      const u32 = (at: number, n: number) => b.writeUInt32LE(n, at);
+      const ptr = (at: number, n: number) =>
+        b.writeBigUInt64LE(base + BigInt(n), at);
+      const rel = (at: number, n: number) => b.writeInt32LE(n - at, at);
+      u32(0, 0xfeedfacf);
+      u32(4, 0x0100000c);
+      u32(12, 2);
+      u32(16, 1);
+      u32(20, 152);
+      u32(32, 0x19);
+      u32(36, 152);
+      b.write("__TEXT", 40);
+      ptr(56, 0);
+      b.writeBigUInt64LE(4096n, 64);
+      b.writeBigUInt64LE(4096n, 80);
+      u32(88, 5);
+      u32(92, 5);
+      u32(96, 1);
+      b.write("__swift5_types", 104);
+      b.write("__TEXT", 120);
+      ptr(136, 0x200);
+      b.writeBigUInt64LE(8n, 144);
+      u32(152, 0x200);
+      for (const [field, descriptor, name, implementation] of [
+        [0x200, 0x300, 0x500, 0x800],
+        [0x204, 0x380, 0x520, 0x810],
+      ] as const) {
+        rel(field, descriptor);
+        u32(descriptor, 0x80000010);
+        rel(descriptor + 8, name);
+        u32(descriptor + 28, 1);
+        u32(descriptor + 44, 0);
+        u32(descriptor + 48, 1);
+        u32(descriptor + 52, 0);
+        rel(descriptor + 56, implementation);
+      }
+      b.write("KeptClass\0", 0x500);
+      if (mode === "valid") b.write("OtherClass\0", 0x520);
+      if (mode === "unmapped") rel(0x388, 0x5000);
+      return b;
+    };
+
+    const valid = decodeAppleDispatchMetadata(
+      swiftVtableFixture("valid"),
+      100,
+      provenance,
+    );
+    expect(valid.swift_dispatch_slots.map((s) => s.owner)).toEqual([
+      "KeptClass",
+      "OtherClass",
+    ]);
+    expect(
+      valid.coverage.find((c) => c.facet === "swift_class_vtable_descriptors"),
+    ).toMatchObject({
+      status: "complete",
+    });
+
+    const empty = decodeAppleDispatchMetadata(
+      swiftVtableFixture("empty"),
+      100,
+      provenance,
+    );
+    expect(empty.swift_dispatch_slots.map((s) => s.owner)).toEqual([
+      "KeptClass",
+    ]);
+    expect(
+      empty.coverage.find((c) => c.facet === "swift_class_vtable_descriptors"),
+    ).toMatchObject({
+      status: "partial",
+      reason: expect.stringContaining("0x100000204"),
+    });
+
+    const unmapped = decodeAppleDispatchMetadata(
+      swiftVtableFixture("unmapped"),
+      100,
+      provenance,
+    );
+    expect(unmapped.swift_dispatch_slots.map((s) => s.owner)).toEqual([
+      "KeptClass",
+    ]);
+    expect(
+      unmapped.coverage.find(
+        (c) => c.facet === "swift_class_vtable_descriptors",
+      ),
+    ).toMatchObject({
+      status: "partial",
+      reason: expect.stringContaining("0x100000204"),
+    });
+  });
+
   it("rejects malformed command and section boundaries", () => {
     const bytes = fixture();
     bytes.writeUInt32LE(7, 36);
