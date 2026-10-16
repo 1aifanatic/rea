@@ -132,6 +132,25 @@ it("streams stdout beyond the diagnostic budget into a sink and returns after it
   });
 });
 
+it("destroys a sink still finishing when the command deadline elapses", async () => {
+  const sink = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+    final(callback) {
+      setTimeout(callback, 5_000);
+    },
+  });
+  await expect(
+    runOwnedCommand(command('process.stdout.write("observed-output")'), {
+      timeoutMs: 300,
+      diagnosticBytes: 1024,
+      stdout: sink,
+    }),
+  ).rejects.toMatchObject({ reason: "timeout" });
+  expect(sink.destroyed).toBe(true);
+});
+
 it("reports a failed stdout sink as a collection failure", async () => {
   const sink = new Writable({
     write(_chunk, _encoding, callback) {

@@ -172,6 +172,36 @@ it("refuses retention beyond live heap headroom and stops the scan", async () =>
   });
 });
 
+it("refuses a kept string while it is assembled, before Kuna finishes it", async () => {
+  const heap = v8.getHeapStatistics();
+  const text = wire(document());
+  const opening = text.slice(0, text.indexOf("a\\nΔelta"));
+  const reader = new KunaStringInventoryReader();
+  reader.write(Buffer.from(opening));
+  vi.mocked(v8.getHeapStatistics).mockReturnValueOnce({
+    ...heap,
+    total_available_size: 1024,
+  });
+  // One sampling interval of text, still inside one unterminated string.
+  reader.write(Buffer.from("x".repeat(64 * 1024)));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(reader.rejection).toMatchObject({
+    _tag: "AnalysisResourceConstraintError",
+    resource: "memory",
+  });
+  reader.destroy();
+});
+
+it("drops ignored strings unassembled, without sampling headroom", async () => {
+  const sampled = vi.mocked(v8.getHeapStatistics).mock.calls.length;
+  const { result } = await read(
+    wire({ ...document(), padding: "x".repeat(4 * 1024 * 1024) }),
+  );
+  expect(result.ok).toBe(true);
+  // Only the one retained row's admission is sampled.
+  expect(vi.mocked(v8.getHeapStatistics).mock.calls.length - sampled).toBe(1);
+});
+
 it.each([
   { encoding: "utf8", text: "😀😀😀😀😀", length: 5, byte_length: 21 },
   { encoding: "utf16", text: "café!", length: 5, byte_length: 12 },

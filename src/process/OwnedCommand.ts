@@ -162,7 +162,13 @@ const collectOwnedCommand = async (
       },
     },
   );
-  const consumed = consumeStdout(launched.process.stdout, limits.stdout);
+  // A command that fails or is interrupted destroys its sink with its stdout.
+  const abandoned = new AbortController();
+  const consumed = consumeStdout(
+    launched.process.stdout,
+    limits.stdout,
+    AbortSignal.any([signal, abandoned.signal]),
+  );
   void consumed?.then((failed) => {
     if (failed !== undefined) processFailure ??= failed;
   });
@@ -241,6 +247,7 @@ const collectOwnedCommand = async (
             { cause },
           );
   }
+  if (failure !== undefined) abandoned.abort();
   const stopped = await supervisor.stop();
   const snapshot = supervisor.snapshot();
   if (stopped.status === "incomplete" && retainCleanup !== undefined)
@@ -283,14 +290,21 @@ const collectOwnedCommand = async (
   return snapshot;
 };
 
-/** Pipe stdout into its sink; settles with a failure message, never rejects. */
+/**
+ * Pipe stdout into its sink until `signal` aborts, which destroys both; settles
+ * with a failure message, never rejects.
+ */
 const consumeStdout = (
   stdout: Readable | null,
   sink: Writable | undefined,
+  signal: AbortSignal,
 ): Promise<string | undefined> | undefined => {
   if (sink === undefined) return undefined;
-  if (stdout === null) return Promise.resolve("stdout stream is unavailable");
-  return pipeline(stdout, sink).then(
+  if (stdout === null) {
+    sink.destroy();
+    return Promise.resolve("stdout stream is unavailable");
+  }
+  return pipeline(stdout, sink, { signal }).then(
     () => undefined,
     (cause: unknown) =>
       `stdout stream failed: ${cause instanceof Error ? cause.message : String(cause)}`,
