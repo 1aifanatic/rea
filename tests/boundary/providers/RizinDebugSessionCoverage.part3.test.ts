@@ -232,6 +232,27 @@ it.skipIf(process.platform === "win32")(
 );
 
 it.skipIf(process.platform === "win32")(
+  "preserves trailing whitespace and trailing newlines in a coalesced marker frame",
+  async () => {
+    const injected = createInjectedProcess({
+      onWrite: (text, control) => {
+        const marker = /!echo (.+)\n/u.exec(text)?.[1];
+        if (marker !== undefined)
+          setImmediate(() =>
+            control.output(Buffer.from(`value  \n${marker}\0`)),
+          );
+      },
+    });
+    const { manager, started } = await startInjected(injected.spawnProcess);
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const result = await manager.execute(started.value.session_id, "dr");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.result.output).toBe("value  \n");
+  },
+);
+
+it.skipIf(process.platform === "win32")(
   "preserves process-exit evidence when exit occurs before frame waiting",
   async () => {
     const injected = createInjectedProcess({
