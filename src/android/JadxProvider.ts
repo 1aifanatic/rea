@@ -72,11 +72,17 @@ const executionError = (context: {
   if (cause instanceof RegularFileCleanupFailure) {
     const primaryCause =
       cause.outcome.kind === "failed" ? cause.outcome.cause : undefined;
+    const primaryOptions =
+      primaryCause === undefined ? {} : { cause: primaryCause };
     const primary =
       signal?.aborted === true
-        ? new AnalysisCancelledError(request.operation, (primaryCause === undefined ? {} : { cause: primaryCause }))
+        ? new AnalysisCancelledError(request.operation, primaryOptions)
         : timeout.aborted
-          ? new AnalysisTimeoutError(request.operation, OPERATION_TIMEOUT_MS, (primaryCause === undefined ? {} : { cause: primaryCause }))
+          ? new AnalysisTimeoutError(
+              request.operation,
+              OPERATION_TIMEOUT_MS,
+              primaryOptions,
+            )
           : primaryCause instanceof AnalysisError
             ? primaryCause
             : new ProviderAdapterError("jadx", request.operation, {
