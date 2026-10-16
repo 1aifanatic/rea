@@ -125,6 +125,7 @@ const SIZE_PAIR = /^Physical size:\s+(\d+)x(\d+)$/u;
 const SIZE_OVERRIDE = /^Override size:\s+(\d+)x(\d+)$/u;
 const DENSITY_PHYSICAL = /^Physical density:\s+(\d+)$/u;
 const DENSITY_OVERRIDE = /^Override density:\s+(\d+)$/u;
+const DENSITY_BARE = /^(\d+)$/u;
 
 /** Parse `wm size` output into physical and optional override sizes. */
 export const parseWmSizeOutput = (
@@ -165,9 +166,19 @@ export const parseWmDensityOutput = (
   for (const line of stdout.split(/\r?\n/u)) {
     const trimmed = line.trim();
     const physicalMatch = DENSITY_PHYSICAL.exec(trimmed);
-    if (physicalMatch !== null) physical = Number(physicalMatch[1]!);
+    if (physicalMatch !== null) {
+      physical = Number(physicalMatch[1]!);
+      continue;
+    }
     const overrideMatch = DENSITY_OVERRIDE.exec(trimmed);
-    if (overrideMatch !== null) override = Number(overrideMatch[1]!);
+    if (overrideMatch !== null) {
+      override = Number(overrideMatch[1]!);
+      continue;
+    }
+    if (physical === null) {
+      const bareMatch = DENSITY_BARE.exec(trimmed);
+      if (bareMatch !== null) physical = Number(bareMatch[1]!);
+    }
   }
   return { physical, override };
 };
