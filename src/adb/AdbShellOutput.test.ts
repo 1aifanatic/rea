@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseAmStartOutput } from "./AdbShellOutput.js";
+import { parseAmStartOutput, parseWmDensityOutput } from "./AdbShellOutput.js";
 
 const starting =
   "Starting: Intent { act=android.intent.action.MAIN cmp=com.example/.Main }";
@@ -70,6 +70,36 @@ describe("parseAmStartOutput", () => {
       status: "refused",
       startedActivity: null,
       reportedStatus: "ok",
+    });
+  });
+});
+
+describe("parseWmDensityOutput", () => {
+  it("parses bare numeric density output from older Android builds", () => {
+    expect(parseWmDensityOutput("420\n")).toEqual({
+      physical: 420,
+      override: null,
+    });
+    expect(parseWmDensityOutput("420\r\n")).toEqual({
+      physical: 420,
+      override: null,
+    });
+  });
+
+  it("parses labeled physical density and override density", () => {
+    expect(parseWmDensityOutput("Physical density: 420\n")).toEqual({
+      physical: 420,
+      override: null,
+    });
+    expect(
+      parseWmDensityOutput("Physical density: 420\nOverride density: 480\n"),
+    ).toEqual({
+      physical: 420,
+      override: 480,
+    });
+    expect(parseWmDensityOutput("420\nOverride density: 480\n")).toEqual({
+      physical: 420,
+      override: 480,
     });
   });
 });
