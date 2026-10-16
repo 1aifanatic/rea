@@ -73,6 +73,7 @@ import { kunaUnavailable } from "./KunaUnavailable.js";
 import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 
 /** How often a request waiting on the project export reports that it still waits. */
@@ -230,16 +231,6 @@ export class KunaSessionClient implements AnalysisClient {
   readonly #environment: Readonly<NodeJS.ProcessEnv>;
   readonly #runSlots: KunaRunSlots;
   readonly #fileCloseResources = new ArtifactResourceScope();
-  readonly #fileCloseOwner = {
-    retain: (owner: OwnedFileHandle, resource: string) =>
-      this.#fileCloseResources.retain({
-        kind: "file-handle" as const,
-        resource,
-        handle: owner,
-      }),
-    run: <T>(operation: () => Promise<T>) =>
-      this.#fileCloseResources.run(operation),
-  };
   /** Single-function runs in flight, by entry address. */
   readonly #singleFunctionRuns = new Map<string, SingleFunctionRun>();
   /** Completed single-function texts by address, least recently used first. */
@@ -1307,10 +1298,26 @@ export class KunaSessionClient implements AnalysisClient {
   async #ensureInstallation(): Promise<
     Result<KunaInstallation, AnalysisError>
   > {
-    this.#installation ??= inspectKunaInstallation(this.#environment, {
-      fileCloseResources: this.#fileCloseOwner,
-    })
-      .then((inspected): Result<KunaInstallation, AnalysisError> => {
+    this.#installation ??= (async () => {
+      let failedFileClose:
+        | {
+            readonly owner: OwnedFileHandle;
+            readonly lease: AnalysisCleanupLease;
+          }
+        | undefined;
+      const fileCloseResources = {
+        retain: (owner: OwnedFileHandle, resource: string) => {
+          const lease = new AnalysisCleanupLease(() => owner.close());
+          this.#fileCloseResources.retain({ kind: "lease", resource, lease });
+          failedFileClose = { owner, lease };
+        },
+        run: <T>(operation: () => Promise<T>) =>
+          this.#fileCloseResources.run(operation),
+      };
+      try {
+        const inspected = await inspectKunaInstallation(this.#environment, {
+          fileCloseResources,
+        });
         if (!inspected.ok)
           return err(kunaUnavailable("health", inspected.error.reason));
         const committed = this.#profile?.parameters["kuna_sha256"];
@@ -1326,18 +1333,19 @@ export class KunaSessionClient implements AnalysisClient {
             }),
           );
         return ok(inspected.value);
-      })
-      .catch((cause: unknown): Result<KunaInstallation, AnalysisError> => {
+      } catch (cause: unknown) {
         if (!(cause instanceof RegularFileCleanupFailure)) throw cause;
-        return err(
-          new ProviderCleanupError(
-            KUNA_PROVIDER_ID,
-            [cause.path],
-            { reason: String(cause.cleanupCause) },
-            { cause, operation: "health" },
-          ),
+        const error = new ProviderCleanupError(
+          KUNA_PROVIDER_ID,
+          [cause.path],
+          { reason: String(cause.cleanupCause) },
+          { cause, operation: "health" },
         );
-      });
+        if (failedFileClose?.owner === cause.owner)
+          failedFileClose.lease.bindCleanupError(error);
+        return err(error);
+      }
+    })();
     return this.#installation;
   }
 

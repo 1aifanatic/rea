@@ -11,6 +11,7 @@ const injected = vi.hoisted(() => ({
   holdCloseFailures: false,
   releaseCloseFailures: false,
   closeCalls: 0,
+  failCloseReadStage: undefined as "fingerprint" | "shebang" | undefined,
   handles: [] as import("node:fs/promises").FileHandle[],
 }));
 
@@ -19,6 +20,7 @@ afterEach(async () => {
   injected.holdCloseFailures = false;
   injected.releaseCloseFailures = false;
   injected.closeCalls = 0;
+  injected.failCloseReadStage = undefined;
   for (const handle of injected.handles.splice(0))
     if (handle.fd >= 0) await handle.close();
 });
@@ -34,24 +36,45 @@ vi.mock("../../../../src/filesystem/RegularFile.js", async (importOriginal) => {
       async (...args: Parameters<typeof original.openRegularFile>) => {
         const handle = await original.openRegularFile(...args);
         injected.handles.push(handle);
-        if (!injected.failNextClose && !injected.holdCloseFailures)
+        const failNextClose = injected.failNextClose;
+        const failCloseReadStage = injected.failCloseReadStage;
+        if (
+          !failNextClose &&
+          !injected.holdCloseFailures &&
+          !failCloseReadStage
+        )
           return handle;
         injected.failNextClose = false;
+        let readStageMatched = false;
+        let failedClose = false;
         return {
           get fd() {
             return handle.fd;
           },
           stat: (...statArgs: Parameters<typeof handle.stat>) =>
             handle.stat(...statArgs),
-          read: (...readArgs: Parameters<typeof handle.read>) =>
-            handle.read(...readArgs),
+          read: (
+            buffer: Buffer,
+            offset: number,
+            length: number,
+            position: number,
+          ) => {
+            if (failCloseReadStage === "fingerprint" && length > 2)
+              readStageMatched = true;
+            if (failCloseReadStage === "shebang" && length === 2)
+              readStageMatched = true;
+            return handle.read(buffer, offset, length, position);
+          },
           close: async () => {
             injected.closeCalls += 1;
             if (
-              injected.closeCalls === 1 ||
+              (failNextClose && !failedClose) ||
+              (readStageMatched && !failedClose) ||
               (injected.holdCloseFailures && !injected.releaseCloseFailures)
-            )
+            ) {
+              failedClose = true;
               throw new Error("injected close fault");
+            }
             await handle.close();
           },
         } as unknown as typeof handle;
@@ -67,6 +90,44 @@ import { inspectKunaProvider } from "../../../../src/kuna/KunaDoctor.js";
 import { inspectKunaInstallationOwned } from "./kunaFileCloseOwner.js";
 import { fakeKunaCalls } from "./fakeKuna.js";
 import { run, session } from "./kunaSessionFixture.js";
+
+it
+  .skipIf(process.platform === "win32")
+  .each([{ stage: "fingerprint" }, { stage: "shebang" }] as const)(
+  "resolves the originating installation cleanup error after a $stage close failure is retried at retirement",
+  async ({ stage }) => {
+    const fixture = await session("rea-kuna-installation-owner-resolution-");
+    const client = fixture.open();
+    injected.closeCalls = 0;
+    injected.failCloseReadStage = stage;
+    try {
+      const health = await client.execute("health", {});
+      expect(health.ok).toBe(false);
+      if (health.ok)
+        throw new Error("installation inspection unexpectedly passed");
+      const originatingError = health.error;
+      const originalCause = originatingError.cause;
+      expect(originatingError).toMatchObject({
+        cleanupIncomplete: true,
+        cleanupResources: [fixture.kuna],
+      });
+      expect(originalCause).toMatchObject({
+        name: "RegularFileCleanupFailure",
+      });
+      const failedCloseCall = stage === "fingerprint" ? 1 : 2;
+      expect(injected.closeCalls).toBe(failedCloseCall);
+
+      expect(await client.close()).toEqual({ ok: true, value: null });
+      expect(originatingError.cleanupIncomplete).toBe(false);
+      expect(originatingError.cause).toBe(originalCause);
+      expect(injected.closeCalls).toBe(failedCloseCall + 1);
+    } finally {
+      injected.failCloseReadStage = undefined;
+      const closed = await client.close();
+      if (!closed.ok) throw closed.error;
+    }
+  },
+);
 
 it.skipIf(process.platform === "win32")(
   "retains and retries the exact Kuna executable hash owner without running Kuna",
