@@ -544,4 +544,43 @@ describe("reconstruction coverage verifier future timestamps", () => {
       ]),
     );
   });
+
+  it("fails closed when a passing package proof conflicts with a failing proof for the same artifact", () => {
+    const workspace = completeReconstructionCoverageData();
+    const [passProof, independenceProof] = workspace.package_proofs;
+    if (passProof === undefined || independenceProof === undefined)
+      throw new Error("Expected fixture package proofs");
+    const failProof = {
+      ...passProof,
+      proof_id: "proof.clean-install.failed",
+      status: "fail" as const,
+      evidence_ids: [reconstructionCoverageEvidenceId("3")],
+    };
+    for (const packageProofs of [
+      [failProof, independenceProof],
+      [passProof, failProof, independenceProof],
+      [failProof, passProof, independenceProof],
+    ]) {
+      const evaluated = evaluateReconstructionClosure(
+        createReconstructionCoverageData({
+          ...workspace,
+          package_proofs: packageProofs,
+        }),
+        "replacement.cli",
+        RECONSTRUCTION_COVERAGE_NOW,
+      );
+      expect(evaluated).toMatchObject({
+        status: "failed",
+        reasons: [
+          expect.objectContaining({
+            code: "package-proof-failed",
+            subject_id: "clean-install",
+          }),
+        ],
+      });
+      expect(evaluated.evidence_ids).toContain(
+        reconstructionCoverageEvidenceId("3"),
+      );
+    }
+  });
 });
