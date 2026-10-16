@@ -48,10 +48,23 @@ export interface ReconstructionEvaluationContext extends ParsedReconstructionCov
   readonly evidenceIds: Set<string>;
 }
 
+const boundarySurfaceIds = (
+  context: ReconstructionEvaluationContext,
+): readonly string[] => {
+  const ids = new Set<string>(context.boundary.required_surface_ids);
+  for (const claimId of context.boundary.required_claim_ids) {
+    const claim = context.claims.get(claimId);
+    if (claim !== undefined) {
+      for (const surfaceId of claim.surface_ids) ids.add(surfaceId);
+    }
+  }
+  return [...ids];
+};
+
 export const evaluateReconstructionSurfaces = (
   context: ReconstructionEvaluationContext,
 ): void => {
-  for (const surfaceId of context.boundary.required_surface_ids) {
+  for (const surfaceId of boundarySurfaceIds(context)) {
     const surface = context.surfaces.get(surfaceId);
     if (surface === undefined) {
       addReason(
@@ -395,12 +408,11 @@ export const evaluateReconstructionCoverageRisks = (
         unknownId,
         "Active residual unknown is not permitted by the completion boundary.",
       );
+  const requiredSurfaceIds = new Set(boundarySurfaceIds(context));
   for (const contradiction of context.coverage.contradictions)
     if (
       contradiction.status === "active" &&
-      (contradiction.surface_ids.some((id) =>
-        context.boundary.required_surface_ids.includes(id),
-      ) ||
+      (contradiction.surface_ids.some((id) => requiredSurfaceIds.has(id)) ||
         contradiction.claim_ids.some((id) =>
           context.boundary.required_claim_ids.includes(id),
         ))
