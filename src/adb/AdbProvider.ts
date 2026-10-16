@@ -534,6 +534,7 @@ const describeAdbFailure = (cause: unknown): string =>
 interface ScreenPublicationCloseFailure {
   readonly cause: unknown;
   readonly resource: string;
+  bindCleanupError(error: ProviderCleanupError): void;
 }
 
 /** Exclusive-create fallback for filesystems that cannot hard-link staged files. */
@@ -550,8 +551,12 @@ const publishScreenExclusively = async (
   // the visible file despite later cancellation so its receipt remains known.
   const ownedOutput = new OwnedFileHandle(output);
   const handleResource = `${outputPath} (ADB publication handle)`;
+  let linkedCloseError: ProviderCleanupError | undefined;
   const closeOnly = {
-    release: () => ownedOutput.close(),
+    async release() {
+      await ownedOutput.close();
+      linkedCloseError?.resolveCleanup();
+    },
   };
   const removeOutput = async (
     expected: Awaited<ReturnType<typeof output.stat>>,
@@ -618,7 +623,13 @@ const publishScreenExclusively = async (
         resource: handleResource,
         lease: closeOnly,
       });
-      return { cause, resource: handleResource };
+      return {
+        cause,
+        resource: handleResource,
+        bindCleanupError(error) {
+          linkedCloseError = error;
+        },
+      };
     }
   }
 
@@ -3037,16 +3048,17 @@ export class AdbProvider {
             ],
           },
         );
-        if (publicationCloseFailure !== undefined)
-          return err(
-            this.#cleanupError(
-              operation,
-              { serial: input.serial, output_directory: directory.value },
-              [publicationCloseFailure.cause],
-              [publicationCloseFailure.resource],
-              completed,
-            ),
+        if (publicationCloseFailure !== undefined) {
+          const cleanupError = this.#cleanupError(
+            operation,
+            { serial: input.serial, output_directory: directory.value },
+            [publicationCloseFailure.cause],
+            [publicationCloseFailure.resource],
+            completed,
           );
+          publicationCloseFailure.bindCleanupError(cleanupError);
+          return err(cleanupError);
+        }
         return ok(completed);
       },
     );

@@ -423,7 +423,9 @@ test("waits for descriptor close before rolling back an incomplete exclusive out
   await f.provider.close();
 });
 
-test("preserves a completed exclusive publication receipt when descriptor close fails", async () => {
+const exclusiveScreenCloseFixture = async (
+  fails: (attempt: number) => boolean,
+) => {
   const f = await fixture();
   const actualFs =
     await vi.importActual<typeof import("node:fs/promises")>(
@@ -446,8 +448,7 @@ test("preserves a completed exclusive publication receipt when descriptor close 
       get(target, property) {
         if (property === "close")
           return async () => {
-            closeAttempts += 1;
-            if (closeAttempts === 1)
+            if (fails(++closeAttempts))
               throw new Error("controlled descriptor close fault");
             await target.close();
           };
@@ -456,21 +457,73 @@ test("preserves a completed exclusive publication receipt when descriptor close 
       },
     });
   });
+  return { ...f, output, destination, closeAttempts: () => closeAttempts };
+};
+
+test.each([false, true])(
+  "preserves the completed receipt after handle recovery with root failure %s",
+  async (rootFails) => {
+    const f = await exclusiveScreenCloseFixture((attempt) => attempt === 1);
+    let runtimePath: string | undefined;
+    if (rootFails)
+      vi.spyOn(PrivateRuntimeRoot.prototype, "close").mockImplementationOnce(
+        async function (this: PrivateRuntimeRoot) {
+          runtimePath = this.path;
+          throw new Error("controlled workspace removal fault");
+        },
+      );
+    const result = await f.provider.execute({
+      operation: "capture_adb_screen",
+      input: { serial: "device", output_directory: f.output },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected close failure");
+    expect(parseEvidence(result.error.partialObservation)).toMatchObject({
+      operation: "capture_adb_screen",
+      confidence: "observed",
+      normalized_result: { local_path: f.destination, bytes: f.png.byteLength },
+    });
+    expect(result.error.cleanupIncomplete).toBe(rootFails);
+    if (rootFails) expect(result.error.cleanupResources).toEqual([runtimePath]);
+    expect(await readFile(f.destination)).toEqual(f.png);
+    expect(f.closeAttempts()).toBe(2);
+    await f.provider.close();
+    if (runtimePath !== undefined)
+      await expect(
+        readFile(join(runtimePath, "screen.png")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
+
+test("keeps a sticky publication close failure until provider close retries its owner", async () => {
+  let allowClose = false;
+  const f = await exclusiveScreenCloseFixture(() => !allowClose);
   const result = await f.provider.execute({
     operation: "capture_adb_screen",
-    input: { serial: "device", output_directory: output },
+    input: { serial: "device", output_directory: f.output },
   });
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("expected close failure");
   expect(result.error.cleanupIncomplete).toBe(true);
+  expect(result.error.cleanupResources).toContain(
+    `${f.destination} (ADB publication handle)`,
+  );
   expect(parseEvidence(result.error.partialObservation)).toMatchObject({
     operation: "capture_adb_screen",
     confidence: "observed",
-    normalized_result: { local_path: destination, bytes: f.png.byteLength },
+    normalized_result: { local_path: f.destination, bytes: f.png.byteLength },
   });
-  expect(await readFile(destination)).toEqual(f.png);
-  expect(closeAttempts).toBe(2);
+  expect(await readFile(f.destination)).toEqual(f.png);
+  expect(f.closeAttempts()).toBe(2);
+  const linkedFailure = (result.error.cause as AggregateError).errors[0] as {
+    readonly cleanupIncomplete: boolean;
+  };
+  expect(linkedFailure.cleanupIncomplete).toBe(true);
+  allowClose = true;
   await f.provider.close();
+  expect(f.closeAttempts()).toBe(3);
+  expect(linkedFailure.cleanupIncomplete).toBe(false);
+  expect(await readFile(f.destination)).toEqual(f.png);
 });
 
 test("retains incomplete cleanup on a cancelled capture while keeping cancellation typed", async () => {
