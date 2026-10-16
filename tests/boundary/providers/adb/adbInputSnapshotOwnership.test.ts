@@ -13,6 +13,7 @@ import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js
 import { PrivateRuntimeRoot } from "../../../../src/process/PrivateRuntimeRoot.js";
 import { AdbInputSnapshotFailure } from "../../../../src/adb/AdbInputSnapshot.js";
 import { AnalysisOutputError } from "../../../../src/domain/analysisErrorCore.js";
+import { OwnedFileHandle } from "../../../../src/filesystem/OwnedFileHandle.js";
 
 vi.mock(
   "../../../../src/process/ExecFileOutput.js",
@@ -197,6 +198,112 @@ test("closes retained snapshot handles before removing their runtime root", asyn
     expect(result.error.cause).toBeDefined();
   }
   await provider.close();
+});
+
+test("retries the same retained snapshot owner before removing its root", async () => {
+  const f = await fixture();
+  const actualFs =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  const runtime = await PrivateRuntimeRoot.create({
+    prefix: "rea-adb-persistent-order-",
+  });
+  const snapshotPath = join(runtime.path, basename(f.source));
+  const rawHandles = new Map<
+    string,
+    Awaited<ReturnType<typeof actualFs.open>>
+  >();
+  let rootCloseAttempts = 0;
+  let sourceCloseDenials = 3;
+  let retainedSourceOwner: OwnedFileHandle | undefined;
+  const sourceOwnerAttempts: OwnedFileHandle[] = [];
+  const destinationOwnerAttempts: OwnedFileHandle[] = [];
+  const originalOwnerClose = OwnedFileHandle.prototype.close;
+  const ownerClose = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockImplementation(async function (this: OwnedFileHandle) {
+      if (this.handle === rawHandles.get(f.source)) {
+        retainedSourceOwner ??= this;
+        sourceOwnerAttempts.push(this);
+        if (sourceCloseDenials > 0) {
+          sourceCloseDenials -= 1;
+          throw new Error("controlled persistent snapshot close fault");
+        }
+      } else if (this.handle === rawHandles.get(snapshotPath)) {
+        destinationOwnerAttempts.push(this);
+      }
+      return originalOwnerClose.call(this);
+    });
+  vi.mocked(open).mockImplementation(async (...args) => {
+    const path = String(args[0]);
+    const handle = await actualFs.open(...args);
+    if (path === f.source || path === snapshotPath)
+      rawHandles.set(path, handle);
+    return handle;
+  });
+
+  const provider = new AdbProvider({
+    environment: { REA_ADB_PATH: join(f.root, "adb") },
+    createRuntimeRoot: async () => ({
+      path: runtime.path,
+      close: async () => {
+        rootCloseAttempts += 1;
+        if (rawHandles.get(f.source)?.fd !== -1)
+          throw new Error("runtime root removal attempted with source open");
+        await runtime.close();
+      },
+    }),
+  });
+  try {
+    const result = await provider.execute(f.request);
+    expect(result.ok).toBe(false);
+    if (result.ok)
+      throw new Error("expected persistent snapshot cleanup failure");
+    const originatingError = result.error;
+    const originatingCause = originatingError.cause;
+    expect(originatingError.cleanupIncomplete).toBe(true);
+    expect(sourceOwnerAttempts).toHaveLength(2);
+    expect(sourceOwnerAttempts[0]).toBe(sourceOwnerAttempts[1]);
+    expect(sourceOwnerAttempts[0]).toBe(retainedSourceOwner);
+    expect(destinationOwnerAttempts).toHaveLength(1);
+    expect(rawHandles.get(f.source)?.fd).toBeGreaterThanOrEqual(0);
+    await expect(lstat(runtime.path)).resolves.toMatchObject({
+      isDirectory: expect.any(Function),
+    });
+
+    await expect(provider.close()).rejects.toMatchObject({
+      cleanupIncomplete: true,
+      cleanupResources: expect.arrayContaining([
+        `${f.source} (ADB snapshot source handle)`,
+      ]),
+    });
+    expect(sourceOwnerAttempts).toHaveLength(3);
+    expect(
+      sourceOwnerAttempts.every((owner) => owner === retainedSourceOwner),
+    ).toBe(true);
+    expect(destinationOwnerAttempts).toHaveLength(1);
+    expect(rootCloseAttempts).toBe(0);
+    expect(originatingError.cleanupIncomplete).toBe(true);
+    expect(originatingError.cause).toBe(originatingCause);
+    expect(rawHandles.get(f.source)?.fd).toBeGreaterThanOrEqual(0);
+    await expect(lstat(runtime.path)).resolves.toBeDefined();
+
+    await provider.close();
+    expect(sourceOwnerAttempts).toHaveLength(4);
+    expect(
+      sourceOwnerAttempts.every((owner) => owner === retainedSourceOwner),
+    ).toBe(true);
+    expect(destinationOwnerAttempts).toHaveLength(1);
+    expect(rootCloseAttempts).toBe(1);
+    expect(originatingError.cleanupIncomplete).toBe(false);
+    expect(originatingError.cause).toBe(originatingCause);
+    await expect(lstat(runtime.path)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    sourceCloseDenials = 0;
+    ownerClose.mockRestore();
+    await provider.close();
+  }
 });
 
 test.each([
