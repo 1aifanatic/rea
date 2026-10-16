@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { link, open, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { link, lstat, open, readFile, rm } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { afterEach, expect, onTestFinished, test, vi } from "vitest";
 
 import { AdbProvider } from "../../../../src/adb/AdbProvider.js";
@@ -123,6 +123,100 @@ test("retains a committed screen capture receipt when cancellation arrives after
   expect(await readFile(join(output, "screen.png"))).toEqual(f.png);
   await f.provider.close();
 });
+
+test.each([1, 2])(
+  "resolves a staged screen error after %i close faults",
+  async (closeFaults) => {
+    const f = await fixture();
+    const actualFs =
+      await vi.importActual<typeof import("node:fs/promises")>(
+        "node:fs/promises",
+      );
+    const output = join(f.root, "captures");
+    const destination = join(output, "screen.png");
+    let stagedPath: string | undefined;
+    let stagedRoot: string | undefined;
+    let closeAttempts = 0;
+    let rawHandle: Awaited<ReturnType<typeof actualFs.open>> | undefined;
+    const closeHandleIdentities: Awaited<ReturnType<typeof actualFs.open>>[] =
+      [];
+    vi.mocked(execFileBytes).mockResolvedValueOnce({
+      stdout: f.png,
+      stderr: Buffer.alloc(0),
+    });
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const path = String(args[0]);
+      const handle = await actualFs.open(...args);
+      if (basename(path) === "screen.png" && path.includes(".rea-screen-")) {
+        stagedPath = path;
+        stagedRoot = dirname(path);
+        rawHandle = handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          closeAttempts += 1;
+          closeHandleIdentities.push(handle);
+          if (closeAttempts <= closeFaults)
+            throw new Error("controlled staged screen close fault");
+          await close();
+        };
+      }
+      return handle;
+    });
+
+    const result = await f.provider.execute({
+      operation: "capture_adb_screen",
+      input: { serial: "device", output_directory: output },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected staged screen cleanup failure");
+    const originatingError = result.error;
+    const originatingCause = originatingError.cause;
+    expect(originatingError.cleanupIncomplete).toBe(closeFaults === 2);
+    expect(originatingError.partialObservation).toBeUndefined();
+    expect(closeAttempts).toBe(2);
+    expect(stagedPath).toBeDefined();
+    expect(stagedRoot).toBeDefined();
+    if (closeFaults === 2) expect(rawHandle?.fd).toBeGreaterThanOrEqual(0);
+    else expect(rawHandle?.fd).toBe(-1);
+    expect(closeHandleIdentities).toHaveLength(2);
+    expect(closeHandleIdentities.every((handle) => handle === rawHandle)).toBe(
+      true,
+    );
+    if (closeFaults === 2)
+      await expect(lstat(stagedRoot!)).resolves.toBeDefined();
+    else
+      await expect(lstat(stagedRoot!)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    await expect(readFile(destination)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+
+    const linkedCleanupError = (
+      closeFaults === 2
+        ? (originatingCause as AggregateError).errors[0]
+        : originatingError
+    ) as {
+      readonly cause: unknown;
+      readonly cleanupIncomplete: boolean;
+    };
+    const originalCloseCause = linkedCleanupError.cause;
+    expect(linkedCleanupError.cleanupIncomplete).toBe(closeFaults === 2);
+    await f.provider.close();
+    expect(closeAttempts).toBe(closeFaults + 1);
+    expect(closeHandleIdentities.every((handle) => handle === rawHandle)).toBe(
+      true,
+    );
+    expect(linkedCleanupError.cleanupIncomplete).toBe(false);
+    expect(linkedCleanupError.cause).toBe(originalCloseCause);
+    expect(originatingError.cleanupIncomplete).toBe(false);
+    expect(originatingError.cause).toBe(originatingCause);
+    await expect(lstat(stagedRoot!)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(destination)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  },
+);
 
 test("retains the committed receipt and cleanup observation when cancellation races with root cleanup", async () => {
   const f = await fixture();

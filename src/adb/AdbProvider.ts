@@ -303,10 +303,12 @@ const syncStagedAdbFile = async (
     return;
   }
   const resource = `${path} (ADB staged-output handle)`;
+  const stagedOwner = owner;
+  const closeLease = new AnalysisCleanupLease(() => stagedOwner.close());
   const released = await resources.release({
-    kind: "file-handle",
+    kind: "lease",
     resource,
-    handle: owner,
+    lease: closeLease,
   });
   if (released.kind === "failed") {
     const cleanup = new ProviderCleanupError(
@@ -320,15 +322,19 @@ const syncStagedAdbFile = async (
       },
       { operation, cause: released.cause },
     );
+    let reported: AnalysisError;
     if (primary !== undefined) {
       const failure = new AnalysisOutputError(
         operation,
         `The staged ADB output could not be synchronized: ${path}`,
         { cause: primary },
       );
-      throw analysisErrorWithCleanupFailure(failure, cleanup, operation);
+      reported = analysisErrorWithCleanupFailure(failure, cleanup, operation);
+    } else {
+      reported = cleanup;
     }
-    throw cleanup;
+    closeLease.bindCleanupError(reported);
+    throw reported;
   }
   if (primary !== undefined) throw primary;
 };
