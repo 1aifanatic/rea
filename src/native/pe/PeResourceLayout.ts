@@ -113,7 +113,7 @@ export const readPeResourceLayout = (bytes: Buffer) => {
       if (
         sections.some(
           (section) =>
-            section.rva < rva + size &&
+            (size === 0 ? section.rva <= rva : section.rva < rva + size) &&
             section.rva + virtualExtent(section) > rva,
         ) ||
         size > headerSize - rva
