@@ -438,24 +438,31 @@ export const evaluateReconstructionPackageProofs = (
       requiredArtifactDigests.every((digest) =>
         proof.artifact_sha256s.includes(digest),
       ) && packageProofHasComparableEvidence(proof, context.evidenceById);
-    const passing = proofs.find(
+    const passing = proofs.filter(
       (proof) => proof.status === "pass" && applicable(proof),
     );
-    if (passing !== undefined) {
-      addEvidence(context, passing.evidence_ids);
-      continue;
-    }
-    const failing = proofs.find(
+    const failing = proofs.filter(
       (proof) => proof.status === "fail" && applicable(proof),
     );
-    if (failing !== undefined) {
-      addEvidence(context, failing.evidence_ids);
+    if (failing.length > 0) {
+      addEvidence(
+        context,
+        [...passing, ...failing].flatMap(({ evidence_ids }) => evidence_ids),
+      );
       addReason(
         context,
         "package-proof-failed",
         kind,
         "Required package or integration proof failed.",
       );
+      continue;
+    }
+    if (passing.length > 0) {
+      addEvidence(
+        context,
+        passing.flatMap(({ evidence_ids }) => evidence_ids),
+      );
+      continue;
     } else if (proofs.length > 0) {
       addEvidence(
         context,
