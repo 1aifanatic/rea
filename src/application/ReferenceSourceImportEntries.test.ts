@@ -317,3 +317,93 @@ it("resolves extensionless imports and requires to .mts and .cts files and direc
     ]),
   );
 });
+
+it("resolves escaped ESM pathnames and strips query/hash while preserving CommonJS literal bytes", () => {
+  const files = [
+    [
+      "main.mjs",
+      [
+        'import "./dep%20name.mjs";',
+        'import "./dep%2520name.mjs";',
+        'import "./caf%C3%A9.mjs";',
+        'import "./dep.mjs?revision=1#first";',
+        'import "./absent%20name.mjs";',
+      ].join("\n"),
+    ],
+    ["main.cjs", 'require("./dep%20name.cjs");\n'],
+    ["dep name.mjs", "export const a = 1;\n"],
+    ["dep%20name.mjs", "export const b = 2;\n"],
+    ["dep%2520name.mjs", "export const c = 3;\n"],
+    ["café.mjs", "export const d = 4;\n"],
+    ["dep.mjs", "export const e = 5;\n"],
+    ["absent%20name.mjs", "export const f = 6;\n"],
+    ["dep name.cjs", 'module.exports = "unrelated";\n'],
+    ["dep%20name.cjs", 'module.exports = "literal";\n'],
+  ] as const;
+
+  const read: ReferenceSourceRead = {
+    root: "/selected/source",
+    entries: files.map(([path, content]) => ({
+      status: "read",
+      kind: "file",
+      path,
+      bytes: Buffer.from(content),
+      size: Buffer.byteLength(content),
+    })),
+    bytesRead: files.reduce(
+      (sum, [, content]) => sum + Buffer.byteLength(content),
+      0,
+    ),
+    limitations: [],
+  };
+
+  const parsed = parseReferenceSourceEntries(
+    read,
+    new Set(files.map(([path]) => path)),
+  );
+
+  expect(parsed.relationships).toContainEqual({
+    from_path: "main.mjs",
+    to: "dep name.mjs",
+    kind: "imports",
+    resolution: "internal",
+    parse_state: "parsed",
+  });
+  expect(parsed.relationships).toContainEqual({
+    from_path: "main.mjs",
+    to: "dep%20name.mjs",
+    kind: "imports",
+    resolution: "internal",
+    parse_state: "parsed",
+  });
+  expect(parsed.relationships).toContainEqual({
+    from_path: "main.mjs",
+    to: "café.mjs",
+    kind: "imports",
+    resolution: "internal",
+    parse_state: "parsed",
+  });
+  expect(parsed.relationships).toContainEqual({
+    from_path: "main.mjs",
+    to: "dep.mjs",
+    kind: "imports",
+    resolution: "internal",
+    parse_state: "parsed",
+  });
+  // Absent negative control: does not resolve to literal "absent%20name.mjs"
+  expect(parsed.relationships).toContainEqual({
+    from_path: "main.mjs",
+    to: "absent name.mjs",
+    kind: "imports",
+    resolution: "unresolved",
+    parse_state: "parsed",
+  });
+  // CommonJS preserves literal percent characters without URL decoding
+  expect(parsed.relationships).toContainEqual({
+    from_path: "main.cjs",
+    to: "dep%20name.cjs",
+    kind: "requires",
+    resolution: "internal",
+    parse_state: "parsed",
+  });
+});
