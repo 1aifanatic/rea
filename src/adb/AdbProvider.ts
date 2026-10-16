@@ -1118,6 +1118,17 @@ export class AdbProvider {
                 `The caller input could not be staged for adb: ${cause.sourcePath}`,
                 { cause: cause.primaryCause ?? cause },
               );
+        // Snapshot handle cleanup may recover when the runtime-root lease is
+        // drained below. Keep that historical failure linked to the typed
+        // primary error while the lease owns and clears live cleanup state.
+        primary.retainSecondaryFailure(
+          new AnalysisOutputError(
+            operation,
+            `ADB input snapshot cleanup previously failed for ${cause.sourcePath}`,
+            { cause },
+          ),
+          {},
+        );
       } else {
         primary =
           cause instanceof AnalysisError

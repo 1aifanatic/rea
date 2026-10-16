@@ -196,10 +196,7 @@ const hashAndroidSource = async (
 interface PendingCleanup {
   session: JadxSession | undefined;
   root: JadxWorkspaceRoot | undefined;
-  readonly fileHandles: {
-    readonly path: string;
-    readonly owner: OwnedFileHandle;
-  }[];
+  readonly fileHandles: Map<OwnedFileHandle, string>;
   readonly previousError: AnalysisError | undefined;
   readonly operationCause: unknown;
   reportedError?: AnalysisError;
@@ -229,7 +226,7 @@ const cleanup = async (
     readonly owner: OwnedFileHandle;
     readonly cause: unknown;
   }[] = [];
-  for (const { path, owner } of resources.fileHandles) {
+  for (const [owner, path] of resources.fileHandles) {
     try {
       await owner.close();
       if (
@@ -237,18 +234,10 @@ const cleanup = async (
         resources.operationCause.owner === owner
       )
         previousError?.resolveCleanup();
+      resources.fileHandles.delete(owner);
     } catch (cause: unknown) {
       failedHandles.push({ path, owner, cause });
     }
-  }
-  const closedHandles = new Set(
-    resources.fileHandles.filter(
-      ({ owner }) => !failedHandles.some((failed) => failed.owner === owner),
-    ),
-  );
-  for (const owner of closedHandles) {
-    const index = resources.fileHandles.indexOf(owner);
-    if (index >= 0) resources.fileHandles.splice(index, 1);
   }
   if (sessionCloseFailed || failedHandles.length > 0) {
     const cleanupCauses = [
@@ -405,7 +394,7 @@ export class JadxProvider implements AndroidAnalysisPort {
       this.#pendingCleanup = {
         session: this.#retained.session,
         root: this.#retained.root,
-        fileHandles: [],
+        fileHandles: new Map(),
         previousError: undefined,
         operationCause: undefined,
       };
@@ -442,14 +431,11 @@ export class JadxProvider implements AndroidAnalysisPort {
         : AbortSignal.any([options.signal, timeout]);
     let root: JadxWorkspaceRoot | undefined;
     let session: JadxSession | undefined;
-    const fileHandles: {
-      readonly path: string;
-      readonly owner: OwnedFileHandle;
-    }[] = [];
+    const fileHandles: PendingCleanup["fileHandles"] = new Map();
     const retainFailedClose =
       (path: string) =>
       (owner: OwnedFileHandle): void => {
-        fileHandles.push({ path, owner });
+        fileHandles.set(owner, path);
       };
     try {
       if (target.format !== "apk")

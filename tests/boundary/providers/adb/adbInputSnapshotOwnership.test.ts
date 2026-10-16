@@ -11,6 +11,8 @@ import {
 import { parseEvidence } from "../../../../src/domain/evidence.js";
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
 import { PrivateRuntimeRoot } from "../../../../src/process/PrivateRuntimeRoot.js";
+import { AdbInputSnapshotFailure } from "../../../../src/adb/AdbInputSnapshot.js";
+import { AnalysisOutputError } from "../../../../src/domain/analysisErrorCore.js";
 
 vi.mock(
   "../../../../src/process/ExecFileOutput.js",
@@ -196,6 +198,59 @@ test("closes retained snapshot handles before removing their runtime root", asyn
   }
   await provider.close();
 });
+
+test.each([
+  { label: "read failure", cancel: false, tag: "AnalysisOutputError" },
+  { label: "cancellation", cancel: true, tag: "AnalysisCancelledError" },
+])(
+  "preserves the $label chain when immediate snapshot cleanup recovers",
+  async ({ cancel, tag }) => {
+    const f = await fixture();
+    const actualFs =
+      await vi.importActual<typeof import("node:fs/promises")>(
+        "node:fs/promises",
+      );
+    const controller = new AbortController();
+    let sourceCloseAttempts = 0;
+    vi.mocked(open).mockImplementation(async (...args) => {
+      const handle = await actualFs.open(...args);
+      if (String(args[0]) !== f.source) return handle;
+      const close = handle.close.bind(handle);
+      handle.read = (async () => {
+        if (cancel) {
+          controller.abort();
+        }
+        throw new Error("controlled snapshot read failure");
+      }) as typeof handle.read;
+      handle.close = async () => {
+        sourceCloseAttempts += 1;
+        if (sourceCloseAttempts === 1)
+          throw new Error("controlled snapshot handle close failure");
+        await close();
+      };
+      return handle;
+    });
+
+    const result = await f.provider.execute(f.request, {
+      signal: controller.signal,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected snapshot operation failure");
+    expect(result.error._tag).toBe(tag);
+    expect(result.error.cleanupIncomplete).toBe(false);
+    expect(result.error.cleanupResources).toEqual([]);
+    expect(sourceCloseAttempts).toBe(2);
+    const cause = result.error.cause;
+    expect(cause).toBeInstanceOf(AggregateError);
+    const secondary = (cause as AggregateError).errors.find(
+      (entry) => entry instanceof AnalysisOutputError,
+    );
+    expect(secondary?.cause).toBeInstanceOf(AdbInputSnapshotFailure);
+    expect(
+      (secondary?.cause as AdbInputSnapshotFailure).cleanupCause,
+    ).toBeDefined();
+  },
+);
 
 test.each([
   { cancelDuringClose: false, failRead: false },

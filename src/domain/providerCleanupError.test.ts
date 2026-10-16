@@ -52,6 +52,7 @@ it.each([false, true])(
         },
       },
     });
+    expect(combined.cause).toBeInstanceOf(AggregateError);
     expect((combined.cause as AggregateError).errors).toEqual([
       primary,
       cleanup,
