@@ -84,6 +84,26 @@ describe("JavaScript semantic analysis: runtime boundaries 1", () => {
     expect(ir.timerOperations).toEqual([]);
   });
 
+  it("treats overflowing numeric timer delays as unknown null delays", () => {
+    const ir = analyzeJavaScriptSemantics(`
+      setTimeout(work, 1e1000);
+      setInterval(tick, 25);
+    `);
+
+    expect(ir.timerOperations).toEqual([
+      expect.objectContaining({
+        kind: "schedule",
+        method: "setTimeout",
+        delayMilliseconds: null,
+      }),
+      expect.objectContaining({
+        kind: "schedule",
+        method: "setInterval",
+        delayMilliseconds: 25,
+      }),
+    ]);
+  });
+
   it("does not invent request fields or option keys from dynamic properties", () => {
     const ir = analyzeJavaScriptSemantics(`
       const key = resolveKey();
