@@ -26,6 +26,7 @@ import type { KunaExportStatus } from "../../../../src/kuna/KunaProjectExport.js
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
 import { OwnedFileHandle } from "../../../../src/filesystem/OwnedFileHandle.js";
 import { RegularFileCleanupFailure } from "../../../../src/filesystem/OwnedRegularFile.js";
+import { ProviderCleanupError } from "../../../../src/domain/providerCleanupError.js";
 import {
   fakeKunaCalls,
   setFakeKunaBehavior,
@@ -203,11 +204,15 @@ it("retains a failed warm-cache hash descriptor and retries it at cache close", 
     .mockRejectedValueOnce(closeCause);
   const warmCache = newCache(installation);
   try {
-    await expect(warmCache.lookup(built.value.key)).rejects.toBeInstanceOf(
-      RegularFileCleanupFailure,
-    );
+    const failure = await warmCache
+      .lookup(built.value.key)
+      .catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(ProviderCleanupError);
+    if (!(failure instanceof ProviderCleanupError)) throw failure;
+    expect(failure.cause).toBeInstanceOf(RegularFileCleanupFailure);
     close.mockRestore();
     expect(await warmCache.close()).toEqual({ ok: true, value: null });
+    expect(failure.cleanupIncomplete).toBe(false);
     expect(await warmCache.lookup(built.value.key)).toMatchObject({
       key: built.value.key,
     });
@@ -216,6 +221,73 @@ it("retains a failed warm-cache hash descriptor and retries it at cache close", 
     expect(await warmCache.close()).toEqual({ ok: true, value: null });
     await cache.close();
   }
+});
+
+it("blocks repeated cache reads while a retained hash descriptor cannot close", async () => {
+  const { installation, cache, target } = await fixture(
+    "rea-kuna-cache-hash-admission-",
+  );
+  const input = await target("program");
+  const built = await cache.build({ installation, ...input });
+  if (!built.ok) throw built.error;
+
+  const warmCache = newCache(installation);
+  const owners = new Set<OwnedFileHandle>();
+  const persistentCloseCause = new Error("persistent descriptor close failure");
+  const close = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockImplementation(function (this: OwnedFileHandle) {
+      owners.add(this);
+      return Promise.reject(persistentCloseCause);
+    });
+  try {
+    await expect(warmCache.lookup(built.value.key)).rejects.toMatchObject({
+      cleanupIncomplete: true,
+      cause: expect.any(RegularFileCleanupFailure),
+    });
+    expect(owners.size).toBe(1);
+    expect(warmCache.hasPendingCleanup).toBe(true);
+
+    const blocked: ProviderCleanupError[] = [];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await warmCache.lookup(built.value.key);
+        throw new Error("Lookup admitted a read with a retained descriptor");
+      } catch (cause: unknown) {
+        expect(cause).toBeInstanceOf(ProviderCleanupError);
+        if (!(cause instanceof ProviderCleanupError)) throw cause;
+        blocked.push(cause);
+      }
+    }
+
+    // Retries attempt to release the one retained descriptor; they must not
+    // admit another descriptor while that release remains unconfirmed.
+    expect(owners.size).toBe(1);
+    expect(warmCache.hasPendingCleanup).toBe(true);
+
+    const firstRetry = (blocked[0]?.cause as AggregateError).errors[0];
+    if (!(firstRetry instanceof ProviderCleanupError))
+      throw new Error("Missing retained hash retry failure");
+    const originatingFailure = (firstRetry.cause as AggregateError).errors[0];
+    for (const failure of blocked) {
+      const retry = (failure.cause as AggregateError).errors[0];
+      expect(retry).toBeInstanceOf(ProviderCleanupError);
+      if (!(retry instanceof ProviderCleanupError)) continue;
+      const causes = (retry.cause as AggregateError).errors;
+      expect(causes).toHaveLength(2);
+      expect(causes[0]).toBe(originatingFailure);
+      expect(causes[1]).toBe(persistentCloseCause);
+    }
+  } finally {
+    close.mockRestore();
+  }
+
+  expect(await warmCache.lookup(built.value.key)).toMatchObject({
+    key: built.value.key,
+  });
+  expect(warmCache.hasPendingCleanup).toBe(false);
+  expect(await warmCache.close()).toEqual({ ok: true, value: null });
+  await cache.close();
 });
 
 it("shares one Kuna run between concurrent requests for one export", async () => {
