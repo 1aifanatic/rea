@@ -23,6 +23,7 @@ import {
   type KunaProcessLauncher,
 } from "./KunaCommand.js";
 import type { KunaInstallation } from "./KunaInstallation.js";
+import { KUNA_DIAGNOSTIC_BYTES } from "./KunaLimits.js";
 import {
   parseKunaExportSummary,
   parseKunaInventory,
@@ -35,9 +36,6 @@ import { KUNA_PROVIDER_ID } from "./KunaRelease.js";
 
 /** Operation name every export and cache failure reports. */
 export const KUNA_EXPORT_OPERATION = "kuna:decompile-project";
-
-/** Kuna prints one summary line per export; notes on a large image stay far below this. */
-const DIAGNOSTIC_BYTES = 8 * 1024 * 1024;
 
 const INVENTORY_FILE = "functions.json";
 
@@ -276,7 +274,8 @@ export const exportKunaProject = async (
       "--jobs",
       String(configuration.jobs),
     ],
-    DIAGNOSTIC_BYTES,
+    // Kuna prints one summary line per export on stdout.
+    KUNA_DIAGNOSTIC_BYTES,
   );
   if (!exported.ok) return exported.outcome;
 

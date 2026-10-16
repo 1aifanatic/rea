@@ -1,3 +1,6 @@
+import type { Readable, Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
 import type {
   OwnedProviderProcessSpawnOptions,
   ProviderProcessSnapshot,
@@ -13,6 +16,7 @@ import {
   type OwnedProcessGroup,
   type ProcessCleanupFailure,
 } from "./ProcessOwnership.js";
+import { ABORTED, waitForAbortable } from "./AbortablePromise.js";
 import {
   ProviderStartupDeadline,
   waitForAbortableDelay,
@@ -52,15 +56,25 @@ export const ownedCommandResources = (
   `process-group:${ownership.processGroupId}`,
 ];
 
+/** Output handling for one owned command. */
+interface OwnedCommandLimits {
+  /** Retained stderr bytes, plus stdout bytes unless a sink consumes stdout. */
+  readonly diagnosticBytes: number;
+  /** Accept an ordinary nonzero exit after output closes without other process errors. */
+  readonly acceptNonZeroExit?: boolean;
+  /**
+   * Receives stdout instead of the retained snapshot, for output parsed as it
+   * arrives. The command completes only after the sink finishes. The sink
+   * records its own rejections and keeps accepting, so the command's outcome
+   * stays authoritative; a failing stream is a collection failure.
+   */
+  readonly stdout?: Writable;
+}
+
 /** Execute a single owned process with independent cleanup and bounded diagnostic retention. */
 export const runOwnedCommand = async (
   spawn: OwnedProviderProcessSpawnOptions,
-  limits: {
-    readonly timeoutMs: number;
-    readonly diagnosticBytes: number;
-    /** Accept an ordinary nonzero exit after output closes without other process errors. */
-    readonly acceptNonZeroExit?: boolean;
-  },
+  limits: OwnedCommandLimits & { readonly timeoutMs: number },
   options: {
     readonly signal?: AbortSignal | undefined;
     /** Synchronously accept unresolved cleanup ownership; execution still returns its original outcome. Must not throw. */
@@ -96,11 +110,7 @@ export const runOwnedCommand = async (
 
 const collectOwnedCommand = async (
   spawn: OwnedProviderProcessSpawnOptions,
-  limits: {
-    readonly diagnosticBytes: number;
-    /** Accept an ordinary nonzero exit after output closes without other process errors. */
-    readonly acceptNonZeroExit?: boolean;
-  },
+  limits: OwnedCommandLimits,
   launcher: (
     input: OwnedProviderProcessSpawnOptions,
   ) => Promise<SpawnedOwnedProviderProcess>,
@@ -143,6 +153,7 @@ const collectOwnedCommand = async (
         (() => cleanupOwnedProcessGroup(launched.ownership)),
     },
     {
+      captureStdout: limits.stdout === undefined,
       maxDiagnosticBytes: limits.diagnosticBytes,
       onDiagnostic: (event) => {
         if (event.type === "output" && event.truncated === true)
@@ -151,6 +162,10 @@ const collectOwnedCommand = async (
       },
     },
   );
+  const consumed = consumeStdout(launched.process.stdout, limits.stdout);
+  void consumed?.then((failed) => {
+    if (failed !== undefined) processFailure ??= failed;
+  });
   let failure: OwnedCommandFailure | undefined;
   try {
     while (!(await supervisor.waitForOutputClose(10))) {
@@ -173,6 +188,12 @@ const collectOwnedCommand = async (
         });
       await waitForAbortableDelay(25, signal);
     }
+    // Output has closed, but the sink may still be parsing what it buffered.
+    if (
+      consumed !== undefined &&
+      (await waitForAbortable(consumed, signal)) !== ABORTED
+    )
+      processFailure ??= await consumed;
     const snapshot = supervisor.snapshot();
     const interruption = deadline.interruption;
     if (interruption !== undefined)
@@ -260,4 +281,18 @@ const collectOwnedCommand = async (
   if (callerSignal?.aborted)
     throw new OwnedCommandFailure("cancelled", "Command cancelled.", snapshot);
   return snapshot;
+};
+
+/** Pipe stdout into its sink; settles with a failure message, never rejects. */
+const consumeStdout = (
+  stdout: Readable | null,
+  sink: Writable | undefined,
+): Promise<string | undefined> | undefined => {
+  if (sink === undefined) return undefined;
+  if (stdout === null) return Promise.resolve("stdout stream is unavailable");
+  return pipeline(stdout, sink).then(
+    () => undefined,
+    (cause: unknown) =>
+      `stdout stream failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+  );
 };
