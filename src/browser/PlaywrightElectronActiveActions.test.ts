@@ -8,6 +8,7 @@ import {
 } from "../domain/javascript/electronActiveObservation.js";
 import { createElectronActiveObservationFixtureResult } from "../domain/javascript/electronActiveObservation.fixture.js";
 import { runElectronActions } from "./PlaywrightElectronActiveActions.js";
+import { projectElectronActiveCapture } from "./PlaywrightElectronActiveProjection.js";
 
 it("requires observed Electron retention and coverage instead of repairing old results", () => {
   const result = createElectronActiveObservationFixtureResult("/opt/app");
@@ -370,6 +371,7 @@ it("rejects action outcomes that disagree with their error state", () => {
 
 it("reports capture-scoped window identities for completed and failed window-targeted actions", async () => {
   const clicked: number[] = [];
+  const disposedHandles: number[] = [];
   const ids = [1, 3];
   const pages = ids.map((id) => ({
     locator: (selector: string) => ({
@@ -380,7 +382,6 @@ it("reports capture-scoped window identities for completed and failed window-tar
     }),
     waitForTimeout: async () => undefined,
   }));
-  const windows = ids.map((id) => ({ window_id: `window:${String(id)}` }));
   const input = electronActiveObservationInputSchema.parse({
     executable_path: "/opt/electron",
     application_path: "/opt/app/main.js",
@@ -395,14 +396,23 @@ it("reports capture-scoped window identities for completed and failed window-tar
   const application = {
     windows: () => pages,
     firstWindow: async () => pages[0],
+    browserWindow: async (page: unknown) => {
+      const idx = pages.indexOf(page as (typeof pages)[number]);
+      const id = ids[idx];
+      return {
+        evaluate: async (fn: (win: unknown) => unknown) =>
+          fn({
+            id,
+            isDestroyed: () => false,
+          }),
+        dispose: async () => {
+          if (id !== undefined) disposedHandles.push(id);
+        },
+      };
+    },
   };
 
-  const result = await runElectronActions(
-    application as never,
-    input,
-    {},
-    windows,
-  );
+  const result = await runElectronActions(application as never, input, {});
 
   expect(clicked).toEqual([1, 3]);
   expect(result.map((action) => action.window_index)).toEqual([0, 1, null, 1]);
@@ -418,4 +428,245 @@ it("reports capture-scoped window identities for completed and failed window-tar
     "completed",
     "failed",
   ]);
+  expect(disposedHandles).toEqual([1, 3, 3]);
+});
+
+it("resolves target identity and crashes the selected BrowserWindow when Page and BrowserWindow inventories differ in order", async () => {
+  const clicked: number[] = [];
+  const crashed: number[] = [];
+  const disposed: number[] = [];
+  const pageB = {
+    locator: () => ({
+      click: async () => {
+        clicked.push(2);
+      },
+    }),
+    waitForTimeout: async () => undefined,
+  };
+  const pageA = {
+    locator: () => ({
+      click: async () => {
+        clicked.push(1);
+      },
+    }),
+    waitForTimeout: async () => undefined,
+  };
+  const pages = [pageB, pageA];
+
+  const handleFor = (id: number) => ({
+    evaluate: async (fn: (win: unknown) => unknown) =>
+      fn({
+        id,
+        isDestroyed: () => false,
+        webContents: {
+          forcefullyCrashRenderer: () => {
+            crashed.push(id);
+          },
+        },
+      }),
+    dispose: async () => {
+      disposed.push(id);
+    },
+  });
+
+  const application = {
+    windows: () => pages,
+    firstWindow: async () => pages[0],
+    browserWindow: async (page: unknown) => {
+      if (page === pageB) return handleFor(2);
+      if (page === pageA) return handleFor(1);
+      throw new Error("unexpected page");
+    },
+  };
+
+  const input = electronActiveObservationInputSchema.parse({
+    executable_path: "/opt/electron",
+    application_path: "/opt/app/main.js",
+    application_root: "/opt/app",
+    actions: [
+      {
+        step_id: "click-page-0",
+        kind: "click",
+        window_index: 0,
+        selector: "#run",
+      },
+      { step_id: "crash-page-1", kind: "renderer-crash", window_index: 1 },
+    ],
+  });
+
+  const result = await runElectronActions(application as never, input, {});
+
+  expect(clicked).toEqual([2]);
+  expect(crashed).toEqual([1]);
+  expect(result.map((action) => action.target)).toEqual([
+    "window:2",
+    "window:1",
+  ]);
+  expect(result.map((action) => action.status)).toEqual([
+    "completed",
+    "completed",
+  ]);
+  expect(disposed).toEqual([2, 1]);
+});
+
+it("preserves action-time targets through final projection across window close and replacement", async () => {
+  const clicked: number[] = [];
+  const disposed: number[] = [];
+  let currentPages: Array<{
+    readonly id: number;
+    locator: (selector: string) => { click: () => Promise<void> };
+  }>;
+
+  const page1 = {
+    id: 1,
+    locator: () => ({
+      click: async () => {
+        clicked.push(1);
+        currentPages = [page2];
+      },
+    }),
+  };
+  const page2 = {
+    id: 2,
+    locator: () => ({
+      click: async () => {
+        clicked.push(2);
+      },
+    }),
+  };
+  currentPages = [page1];
+
+  const application = {
+    windows: () => currentPages,
+    browserWindow: async (page: unknown) => {
+      const pageId = (page as { readonly id: number }).id;
+      return {
+        evaluate: async (fn: (win: unknown) => unknown) =>
+          fn({
+            id: pageId,
+            isDestroyed: () => false,
+          }),
+        dispose: async () => {
+          disposed.push(pageId);
+        },
+      };
+    },
+  };
+
+  const input = electronActiveObservationInputSchema.parse({
+    executable_path: "/opt/electron",
+    application_path: "/opt/app/main.js",
+    application_root: "/opt/app",
+    actions: [
+      {
+        step_id: "action-1",
+        kind: "click",
+        window_index: 0,
+        selector: "#close-and-replace",
+      },
+      {
+        step_id: "action-2",
+        kind: "click",
+        window_index: 0,
+        selector: "#interact-new",
+      },
+    ],
+  });
+
+  const actions = await runElectronActions(application as never, input, {});
+
+  expect(clicked).toEqual([1, 2]);
+  expect(actions.map((action) => action.target)).toEqual([
+    "window:1",
+    "window:2",
+  ]);
+  expect(disposed).toEqual([1, 2]);
+
+  const finalState = {
+    windows: [
+      {
+        window_id: "window:2",
+        web_contents_id: "webContents:2",
+        url: "http://localhost/app",
+        title: "New Window",
+        visible: true,
+        destroyed: false,
+      },
+    ],
+    metrics: [],
+    electronVersion: "33.0.0",
+    hookSnapshot: {
+      events: [],
+      retention_budget_bytes: 1024,
+      estimated_retained_bytes: 0,
+      event_serialized_byte_upper_bound: 0,
+      retained: 0,
+      dropped: 0,
+      dropped_ipc: 0,
+      dropped_runtime: 0,
+      dropped_event_families: [],
+      dropped_event_roles: [],
+      observed: 0,
+      observed_ipc: 0,
+      observed_runtime: 0,
+      hook_error: false,
+    },
+  };
+
+  const projection = projectElectronActiveCapture(
+    { executable: "/opt/electron", application: "/opt/app/main.js" },
+    actions,
+    finalState,
+  );
+
+  expect(projection.actions[0]?.target).toBe("window:1");
+  expect(projection.actions[1]?.target).toBe("window:2");
+});
+
+it("awaits handle disposal and preserves primary action failure when disposal also fails", async () => {
+  let disposeAttempted = false;
+  const page = {
+    locator: () => ({
+      click: async () => {
+        throw new Error("primary locator failure");
+      },
+    }),
+  };
+  const application = {
+    windows: () => [page],
+    browserWindow: async () => ({
+      evaluate: async (fn: (win: unknown) => unknown) =>
+        fn({
+          id: 42,
+          isDestroyed: () => false,
+        }),
+      dispose: async () => {
+        disposeAttempted = true;
+        throw new Error("secondary disposal failure");
+      },
+    }),
+  };
+  const input = electronActiveObservationInputSchema.parse({
+    executable_path: "/opt/electron",
+    application_path: "/opt/app/main.js",
+    application_root: "/opt/app",
+    actions: [
+      {
+        step_id: "fail-step",
+        kind: "click",
+        window_index: 0,
+        selector: "#missing",
+      },
+    ],
+  });
+
+  const result = await runElectronActions(application as never, input, {});
+
+  expect(disposeAttempted).toBe(true);
+  expect(result[0]).toMatchObject({
+    step_id: "fail-step",
+    target: "window:42",
+    status: "failed",
+    error: "primary locator failure",
+  });
 });

@@ -1,4 +1,4 @@
-import type { ElectronApplication, Page } from "playwright-core";
+import type { ElectronApplication, JSHandle, Page } from "playwright-core";
 import { z } from "zod";
 
 import type { ExecutionOptions } from "../application/AnalysisProvider.js";
@@ -69,7 +69,6 @@ export const runElectronActions = async (
   application: ElectronApplication,
   input: ElectronActiveObservationInput,
   options: ExecutionOptions,
-  windows: ReadonlyArray<Pick<ElectronWindowMetadata, "window_id">> = [],
 ): Promise<ElectronActions> => {
   const actions: ElectronActions = [];
   for (const action of input.actions) {
@@ -77,6 +76,7 @@ export const runElectronActions = async (
     const windowIndex = actionWindowIndex(action);
     let selectedWindow: Page | undefined;
     let selectedTarget: string | null = null;
+    let windowHandle: JSHandle | undefined;
     try {
       if (options.signal?.aborted === true)
         throw new BrowserObservationError(OPERATION, "cancelled");
@@ -88,12 +88,13 @@ export const runElectronActions = async (
               windowIndex,
               signal: options.signal,
             });
-      selectedTarget = await resolveSelectedWindowTarget({
+      const resolved = await resolveWindowHandleAndTarget({
         application,
         selectedWindow,
-        windowIndex,
-        windows,
+        signal: options.signal,
       });
+      windowHandle = resolved.handle;
+      selectedTarget = resolved.target;
       if (
         (action.kind === "click" ||
           action.kind === "renderer-reload" ||
@@ -106,6 +107,7 @@ export const runElectronActions = async (
         application,
         action,
         selectedWindow,
+        windowHandle,
         options,
       });
       actions.push({
@@ -134,52 +136,86 @@ export const runElectronActions = async (
         error: safeActionErrorMessage(cause),
       });
       break;
+    } finally {
+      if (windowHandle !== undefined) {
+        try {
+          await windowHandle.dispose();
+        } catch {
+          // Suppress handle disposal errors to preserve primary action failure or outcome.
+        }
+      }
     }
   }
   return actions;
 };
 
-const resolveSelectedWindowTarget = async ({
+const resolveWindowHandleAndTarget = async ({
   application,
   selectedWindow,
-  windowIndex,
-  windows,
+  signal,
 }: {
   readonly application: ElectronApplication;
   readonly selectedWindow: Page | undefined;
-  readonly windowIndex: number | null;
-  readonly windows: ReadonlyArray<Pick<ElectronWindowMetadata, "window_id">>;
-}): Promise<string | null> => {
-  if (selectedWindow === undefined || windowIndex === null) return null;
-  const knownWindowId = windows[windowIndex]?.window_id;
-  if (knownWindowId !== undefined) return knownWindowId;
-  if (typeof application.evaluate === "function") {
-    try {
-      const windowId: unknown = await application.evaluate(
-        (electron, index) => {
-          const candidate = (
-            electron as {
-              readonly BrowserWindow?: {
-                getAllWindows?: () => ReadonlyArray<{ readonly id?: unknown }>;
-              };
-            }
-          )?.BrowserWindow?.getAllWindows?.()[index];
-          return typeof candidate?.id === "number" ? candidate.id : null;
-        },
-        windowIndex,
-      );
-      if (typeof windowId === "number") return `window:${String(windowId)}`;
-    } catch {
-      // Partial test doubles may not expose BrowserWindow metadata.
-    }
+  readonly signal: AbortSignal | undefined;
+}): Promise<{
+  readonly handle: JSHandle | undefined;
+  readonly target: string | null;
+}> => {
+  if (
+    selectedWindow === undefined ||
+    typeof application.browserWindow !== "function"
+  ) {
+    return { handle: undefined, target: null };
   }
-  return `window:${String(windowIndex)}`;
+  let handle: JSHandle | undefined;
+  try {
+    handle = await runWithExecutionLimits(
+      application.browserWindow(selectedWindow),
+      signal,
+    );
+  } catch (cause: unknown) {
+    if (signal?.aborted) throw cause;
+    return { handle: undefined, target: null };
+  }
+  if (handle === undefined) {
+    return { handle: undefined, target: null };
+  }
+  try {
+    const windowId: unknown = await runWithExecutionLimits(
+      handle.evaluate((win: unknown) => {
+        const candidate = win as
+          | {
+              readonly id?: unknown;
+              isDestroyed?: () => boolean;
+            }
+          | null
+          | undefined;
+        if (candidate === null || candidate === undefined) return null;
+        if (
+          typeof candidate.isDestroyed === "function" &&
+          candidate.isDestroyed()
+        )
+          return null;
+        return typeof candidate.id === "number" ? candidate.id : null;
+      }),
+      signal,
+    );
+    return {
+      handle,
+      target:
+        typeof windowId === "number" ? `window:${String(windowId)}` : null,
+    };
+  } catch (cause: unknown) {
+    if (signal?.aborted) throw cause;
+    return { handle, target: null };
+  }
 };
 
 type RunActionContext = {
   readonly application: ElectronApplication;
   readonly action: ElectronAction;
   readonly selectedWindow: Page | undefined;
+  readonly windowHandle: JSHandle | undefined;
   readonly options: ExecutionOptions;
 };
 
@@ -187,6 +223,7 @@ const runAction = async ({
   application,
   action,
   selectedWindow,
+  windowHandle,
   options,
 }: RunActionContext): Promise<void> => {
   switch (action.kind) {
@@ -223,13 +260,32 @@ const runAction = async ({
       );
       return;
     case "renderer-crash": {
+      if (windowHandle === undefined)
+        throw new BrowserObservationError(OPERATION, "window_not_found");
       const crashed = await runWithExecutionLimits(
-        application.evaluate(({ BrowserWindow }, index) => {
-          const candidate = BrowserWindow.getAllWindows()[index];
-          if (candidate === undefined || candidate.isDestroyed()) return false;
+        windowHandle.evaluate((win: unknown) => {
+          const candidate = win as
+            | {
+                readonly isDestroyed?: () => boolean;
+                readonly webContents?: {
+                  forcefullyCrashRenderer?: () => void;
+                };
+              }
+            | null
+            | undefined;
+          if (candidate === null || candidate === undefined) return false;
+          if (
+            typeof candidate.isDestroyed === "function" &&
+            candidate.isDestroyed()
+          )
+            return false;
+          if (
+            typeof candidate.webContents?.forcefullyCrashRenderer !== "function"
+          )
+            return false;
           candidate.webContents.forcefullyCrashRenderer();
           return true;
-        }, action.window_index),
+        }),
         options.signal,
       );
       if (!crashed)

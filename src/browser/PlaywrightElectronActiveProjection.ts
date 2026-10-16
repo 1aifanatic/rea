@@ -133,16 +133,6 @@ const hasObservedPreloadConfiguration = (
 ): boolean =>
   observations.observedEventFamilies.includes("preload-configuration");
 
-const projectActions = (
-  actions: ElectronActiveObservationResult["actions"],
-  windows: ElectronCaptureState["windows"],
-): ElectronActiveObservationResult["actions"] =>
-  actions.map((action) => {
-    if (action.target === null || action.window_index === null) return action;
-    const windowId = windows[action.window_index]?.window_id;
-    return windowId === undefined ? action : { ...action, target: windowId };
-  });
-
 /** Project one provider hook snapshot into the canonical public result. */
 export const projectElectronActiveCapture = (
   paths: ElectronCapturePaths,
@@ -162,7 +152,7 @@ export const projectElectronActiveCapture = (
       process_ownership: "provider-owned",
       cleanup: "terminated-owned-process",
     },
-    actions: projectActions(actions, state.windows),
+    actions,
     windows: state.windows,
     processes: {
       items: state.metrics,
