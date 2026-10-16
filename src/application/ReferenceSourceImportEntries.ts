@@ -264,6 +264,18 @@ const selectPackageMain = (
     : { to: selected, resolution: "internal" };
 };
 
+const normalizeEsmSpecifier = (specifier: string): string | null => {
+  const [withoutFragment] = specifier.split("#", 1);
+  const [withoutQuery] = (withoutFragment ?? "").split("?", 1);
+  const rawPath = withoutQuery ?? "";
+  if (/%(?:2f|5c)/iu.test(rawPath)) return null;
+  try {
+    return decodeURIComponent(rawPath);
+  } catch {
+    return null;
+  }
+};
+
 const resolveInternalSpecifier = (
   fromPath: string,
   specifier: string,
@@ -272,14 +284,22 @@ const resolveInternalSpecifier = (
 ): { to: string; resolution: "internal" | "unresolved" } => {
   if (posix.isAbsolute(specifier))
     return { to: specifier, resolution: "unresolved" };
+  const effectiveSpecifier =
+    mode === "source-import" ? normalizeEsmSpecifier(specifier) : specifier;
+  if (effectiveSpecifier === null)
+    return {
+      to: posix.normalize(posix.join(posix.dirname(fromPath), specifier)),
+      resolution: "unresolved",
+    };
   const normalized = posix.normalize(
-    posix.join(posix.dirname(fromPath), specifier),
+    posix.join(posix.dirname(fromPath), effectiveSpecifier),
   );
   if (logicalPathEscapesRoot(normalized))
     return { to: normalized, resolution: "unresolved" };
   // Preserve directory intent before normalization removes terminal dot segments.
   const directoryReference =
-    specifier.endsWith("/") || [".", ".."].includes(posix.basename(specifier));
+    effectiveSpecifier.endsWith("/") ||
+    [".", ".."].includes(posix.basename(effectiveSpecifier));
   // A directory resolves only to an index with an extension; neither Node nor
   // TypeScript selects an extensionless `index` file.
   const slots = resolutionSuffixes(mode);
