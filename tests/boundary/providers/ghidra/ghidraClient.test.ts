@@ -562,6 +562,35 @@ describe("GhidraClient", () => {
 });
 
 describe("GhidraClient startup lifecycle", () => {
+  it("retains startup failure and cleans up when lineage observation rejects", async () => {
+    const cause = new TypeError("Lineage reader rejected");
+    const observe = vi.spyOn(ProviderRunLineage.prototype, "observe");
+    onTestFinished(() => observe.mockRestore());
+    observe.mockRejectedValueOnce(cause);
+    const launcher = new FixtureLauncher();
+    const client = clientFor(launcher);
+
+    const result = await client.start();
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        kind: "start",
+        message: "Ghidra process lineage observation failed",
+      },
+    });
+    if (result.ok) throw new Error("Expected lineage observation failure");
+    expect(result.error.cause).toBe(cause);
+    const child = launcher.processes[0];
+    if (child === undefined) throw new Error("fixture child was not launched");
+    await expect(waitForChildExit(child, 5_000)).resolves.toBe(true);
+    await expect(access(launcher.runtimeRoots[0] ?? "")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(client.isReady()).toBe(false);
+    await expect(client.start()).resolves.toMatchObject({ ok: true });
+    expect(launcher.processes).toHaveLength(2);
+  });
+
   it("cleans up when the final waiter cancels during lineage observation", async () => {
     let markObservationPending: (() => void) | undefined;
     const observationPending = new Promise<void>((resolve) => {
