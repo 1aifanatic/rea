@@ -308,11 +308,16 @@ const commandFailure = (
       ),
     };
   const exitCode = capturedOutput?.exit_code;
+  const lastStderrLine = capturedOutput?.stderr.trim().split("\n").at(-1);
+  const diagnostic =
+    lastStderrLine !== undefined && lastStderrLine.length > 0
+      ? lastStderrLine
+      : cause.message;
   return {
     kind: "failed",
     error: new ProviderAdapterError(KUNA_PROVIDER_ID, operation, {
       ...details,
-      userMessage: `kuna ${subcommand} failed${exitCode === undefined || exitCode === null ? "" : ` with exit code ${String(exitCode)}`}: ${capturedOutput?.stderr.trim().split("\n").at(-1) ?? cause.message}`,
+      userMessage: `kuna ${subcommand} failed${exitCode === undefined || exitCode === null ? "" : ` with exit code ${String(exitCode)}`}: ${diagnostic}`,
     }),
   };
 };
