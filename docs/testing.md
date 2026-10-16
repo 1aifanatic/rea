@@ -245,7 +245,10 @@ remains owned, both failures survive, and a later close retries it. Repeat
 admission attempts while close still fails: no additional descriptor or
 native command should start. Restore close and verify that the exact owner
 resolves the originating cleanup marker and allows later work, while the earlier
-failure remains available as a diagnostic. Include
+failure remains available as a diagnostic. Cover recovery before the
+caller-specific error is bound to its retained owner, as
+another request can retry cleanup concurrently. Confirm that an already released
+owner resolves a later binding too. Include
 admission failure after opening the descriptor. If caller cancellation returns
 before an inspection settles, gate its final read or close and verify that
 session shutdown waits for the owned work and reports any retained resources.

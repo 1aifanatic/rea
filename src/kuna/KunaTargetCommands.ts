@@ -25,6 +25,7 @@ import type { KunaInstallation } from "./KunaInstallation.js";
 import { KUNA_PROVIDER_ID } from "./KunaRelease.js";
 import type { KunaRunRelease } from "./KunaRunSlots.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
@@ -105,7 +106,7 @@ export class KunaTargetCommands {
         let failedHashClose:
           | {
               readonly owner: OwnedFileHandle;
-              bind(error: ProviderCleanupError): void;
+              readonly lease: AnalysisCleanupLease;
             }
           | undefined;
         const outcome = await runKunaCommand({
@@ -115,23 +116,9 @@ export class KunaTargetCommands {
           reportedTimeoutMs: request.timeoutMs,
           launcher: this.lifetime.launcher,
           retainFailedFileClose: (owner, resource) => {
-            let originatingError: ProviderCleanupError | undefined;
-            this.#resources.retain({
-              kind: "lease",
-              resource,
-              lease: {
-                async release() {
-                  await owner.close();
-                  originatingError?.resolveCleanup();
-                },
-              },
-            });
-            failedHashClose = {
-              owner,
-              bind: (error) => {
-                originatingError = error;
-              },
-            };
+            const lease = new AnalysisCleanupLease(() => owner.close());
+            this.#resources.retain({ kind: "lease", resource, lease });
+            failedHashClose = { owner, lease };
           },
         });
         if (outcome.kind === "retained") {
@@ -149,7 +136,7 @@ export class KunaTargetCommands {
           outcome.error.cause instanceof RegularFileCleanupFailure &&
           outcome.error.cause.owner === failedHashClose?.owner
         )
-          failedHashClose.bind(outcome.error);
+          failedHashClose.lease.bindCleanupError(outcome.error);
         return outcome.kind === "ok"
           ? ok({ ...outcome.snapshot, input: workspace.value.input })
           : err(outcome.error);
