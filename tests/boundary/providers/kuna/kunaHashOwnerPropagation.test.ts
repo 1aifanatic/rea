@@ -94,16 +94,144 @@ it.skipIf(process.platform === "win32")(
       });
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("Kuna command unexpectedly ran");
+      const originatingError = result.error;
+      const originalCause = originatingError.cause;
       expect(result.error).toMatchObject({
         cleanupIncomplete: true,
         cleanupResources: [installed.value.executable],
       });
       expect(await commands.close()).toEqual({ ok: true, value: null });
+      expect(originatingError.cleanupIncomplete).toBe(false);
+      expect(originatingError.cause).toBe(originalCause);
       expect(injected.closeCalls).toBe(2);
       expect(
         (await fakeKunaCalls(fixture.kuna)).map(({ argv }) => argv),
       ).toEqual([["--version"], ["--version"]]);
     } finally {
+      controller.abort();
+      const closed = await commands.close();
+      if (!closed.ok) throw closed.error;
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "blocks command and prepare admission while one retained executable hash owner keeps failing",
+  async () => {
+    const fixture = await session("rea-kuna-hash-owner-admission-");
+    const installed = await inspectKunaInstallationOwned({
+      REA_KUNA_COMMAND: fixture.kuna,
+      REA_KUNA_CACHE_DIR: fixture.cacheRoot,
+    });
+    if (!installed.ok) throw new Error(installed.error.reason);
+    const controller = new AbortController();
+    const commands = new KunaTargetCommands(fixture.target, {
+      signal: controller.signal,
+    });
+    const originalHandleCount = injected.handles.length;
+    let releasedAdmissions = 0;
+    injected.closeCalls = 0;
+    injected.holdCloseFailures = true;
+    injected.releaseCloseFailures = false;
+    try {
+      const request = () =>
+        commands.run({
+          installation: installed.value,
+          operation: "list_procedures",
+          arguments: (input) => ["functions", input, "--json"],
+          timeoutMs: 10_000,
+          outputBytes: 1024 * 1024,
+          signal: controller.signal,
+          releaseRun: () => {
+            releasedAdmissions += 1;
+          },
+        });
+
+      const first = await request();
+      expect(first.ok).toBe(false);
+      if (first.ok)
+        throw new Error("hash descriptor close unexpectedly passed");
+      const blocked = await request();
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) throw new Error("Kuna ran with retained hash cleanup");
+      expect(blocked.error).toMatchObject({ cleanupIncomplete: true });
+      const prepared = await commands.prepare();
+      expect(prepared.ok).toBe(false);
+      if (prepared.ok) throw new Error("prepare passed retained hash cleanup");
+      expect(prepared.error).toMatchObject({ cleanupIncomplete: true });
+
+      expect(injected.closeCalls).toBe(3);
+      expect(injected.handles.length - originalHandleCount).toBe(1);
+      expect(releasedAdmissions).toBe(2);
+      expect(
+        (await fakeKunaCalls(fixture.kuna)).map(({ argv }) => argv[0]),
+      ).not.toContain("functions");
+    } finally {
+      injected.releaseCloseFailures = true;
+      controller.abort();
+      const closed = await commands.close();
+      if (!closed.ok) throw closed.error;
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "resolves the originating hash cleanup error when its exact owner closes on retry",
+  async () => {
+    const fixture = await session("rea-kuna-hash-owner-resolution-");
+    const installed = await inspectKunaInstallationOwned({
+      REA_KUNA_COMMAND: fixture.kuna,
+      REA_KUNA_CACHE_DIR: fixture.cacheRoot,
+    });
+    if (!installed.ok) throw new Error(installed.error.reason);
+    const controller = new AbortController();
+    const commands = new KunaTargetCommands(fixture.target, {
+      signal: controller.signal,
+    });
+    injected.closeCalls = 0;
+    injected.holdCloseFailures = true;
+    injected.releaseCloseFailures = false;
+    try {
+      const request = () =>
+        commands.run({
+          installation: installed.value,
+          operation: "list_procedures",
+          arguments: (input) => ["functions", input, "--json"],
+          timeoutMs: 10_000,
+          outputBytes: 1024 * 1024,
+          signal: controller.signal,
+        });
+
+      const first = await request();
+      expect(first.ok).toBe(false);
+      if (first.ok)
+        throw new Error("hash descriptor close unexpectedly passed");
+      const originatingError = first.error;
+      const originalCause = originatingError.cause;
+      expect(originatingError).toMatchObject({ cleanupIncomplete: true });
+      expect(originalCause).toMatchObject({
+        name: "RegularFileCleanupFailure",
+      });
+
+      const blocked = await request();
+      expect(blocked.ok).toBe(false);
+      if (blocked.ok) throw new Error("Kuna ran with retained hash cleanup");
+      expect(blocked.error).toMatchObject({ cleanupIncomplete: true });
+      expect(injected.closeCalls).toBe(2);
+
+      injected.releaseCloseFailures = true;
+      const recovered = await request();
+      expect(recovered.ok).toBe(true);
+      expect(originatingError.cleanupIncomplete).toBe(false);
+      expect(originatingError.cause).toBe(originalCause);
+      expect(injected.closeCalls).toBe(4);
+      expect(
+        (await fakeKunaCalls(fixture.kuna)).filter(
+          ({ argv }) => argv[0] === "functions",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      injected.releaseCloseFailures = true;
       controller.abort();
       const closed = await commands.close();
       if (!closed.ok) throw closed.error;
