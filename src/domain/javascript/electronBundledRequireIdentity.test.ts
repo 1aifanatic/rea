@@ -196,6 +196,22 @@ describe("Webpack externals with a tampered runtime", () => {
       bootstrap(EXTERNAL, CONSUMER, "n.m=m;n.m[45840]=local;n(100);"),
     ],
     [
+      "a slot replaced through a constant identifier key",
+      bootstrap(
+        EXTERNAL,
+        CONSUMER,
+        "n.m=m;const key=45840;n.m[key]=local;n(100);",
+      ),
+    ],
+    [
+      "a slot replaced through a Number conversion key",
+      bootstrap(EXTERNAL, CONSUMER, 'n.m=m;n.m[Number("45840")]=local;n(100);'),
+    ],
+    [
+      "a slot replaced through an unknown computed key",
+      bootstrap(EXTERNAL, CONSUMER, "n.m=m;n.m[unknownKey()]=local;n(100);"),
+    ],
+    [
       "a cache entry planted before loading",
       bootstrap(EXTERNAL, CONSUMER, "c[45840]={exports:local};n(100);"),
     ],
