@@ -83,6 +83,13 @@ const ROW_REFERENCE_BYTES = 16;
 const describe = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
+/**
+ * Longest key or kept number assembled. Kuna's field names and u64 decimals
+ * are far shorter, so a longer key names no kept field and a longer kept
+ * number is not one Kuna writes.
+ */
+const MAX_TOKEN_CODE_UNITS = 64;
+
 /** V8 copies shorter substrings instead of slicing them. */
 const SLICED_STRING_MIN_LENGTH = 13;
 
@@ -99,10 +106,11 @@ const detached = (text: string): string =>
 /**
  * Validate a Kuna JSON document as Kuna writes it, without buffering it.
  *
- * Keys and numbers are Kuna's own fields and arrive packed. Strings can carry
- * target-derived text of any length, so they arrive in chunks: ignored ones
- * are dropped unassembled, and kept ones are admitted against live heap
- * headroom as they grow, as are retained rows. The first contradiction aborts
+ * Every scalar arrives in chunks and is assembled only as far as it can
+ * matter: keys up to the longest field name, kept numbers up to the longest
+ * u64, and kept strings, which can carry target-derived text of any length,
+ * admitted against live heap headroom as they grow, as are retained rows.
+ * Ignored values are dropped unassembled. The first contradiction aborts
  * `rejected`, letting the owner stop Kuna early. The writable side never
  * fails, so the command's own outcome stays authoritative; `complete` reports
  * what the document established.
@@ -111,12 +119,10 @@ export abstract class KunaJsonDocumentReader extends Writable {
   readonly #hash = createHash("sha256");
   readonly #decoder = new TextDecoder("utf-8", { fatal: true });
   readonly #tokens = jsonParser({
-    packKeys: true,
-    streamKeys: false,
-    packNumbers: true,
-    streamNumbers: false,
+    packKeys: false,
+    packNumbers: false,
     packStrings: false,
-    streamStrings: true,
+    streamValues: true,
   });
   readonly #rejection = new AbortController();
   readonly #frames: Frame[] = [];
@@ -132,7 +138,9 @@ export abstract class KunaJsonDocumentReader extends Writable {
   #target: string | undefined;
   /** Whether `#target` holds a numeric u64 address. */
   #targetIsAddress = false;
-  /** The kept string assembled so far. */
+  /** Whether the scalar being assembled is a key. */
+  #inKey = false;
+  /** The key or kept scalar assembled so far. */
   #text = "";
   #rows = 0;
   #projectedBytes = 0;
@@ -224,6 +232,7 @@ export abstract class KunaJsonDocumentReader extends Writable {
         ? cause
         : this.unusable(describe(cause));
     this.#text = "";
+    this.#inKey = false;
     this.#header = {};
     this.discardRows();
   }
@@ -245,25 +254,30 @@ export abstract class KunaJsonDocumentReader extends Writable {
   }
 
   #consume(token: Token): void {
-    if (this.#skip(token)) return;
+    if (this.#skip(token) || this.#assemble(token)) return;
     switch (token.name) {
-      case "keyValue":
-        this.#key = token.value;
+      case "startKey":
+        this.#inKey = true;
+        return;
+      case "endKey":
+        this.#key = this.#text;
+        this.#text = "";
+        this.#inKey = false;
         return;
       case "startString":
         this.#aim("string");
-        return;
-      case "stringChunk":
-        this.#appendText(token.value);
         return;
       case "endString":
         if (this.#target !== undefined)
           this.#store(detached(this.#text), "string");
         this.#text = "";
         return;
-      case "numberValue":
+      case "startNumber":
         this.#aim("number");
-        this.#store(token.value, "number");
+        return;
+      case "endNumber":
+        this.#store(this.#text, "number");
+        this.#text = "";
         return;
       case "nullValue":
       case "trueValue":
@@ -284,11 +298,26 @@ export abstract class KunaJsonDocumentReader extends Writable {
     }
   }
 
-  /** Keep a chunk of the string being read, admitting it as it grows. */
-  #appendText(chunk: string): void {
-    if (this.#target === undefined) return;
-    this.#text += chunk;
-    this.#charge(chunk.length * 2, this.#text.length);
+  /** Append a scalar fragment within its bound; false for other tokens. */
+  #assemble(token: Token): boolean {
+    if (token.name !== "stringChunk" && token.name !== "numberChunk")
+      return false;
+    const chunk = token.value;
+    if (this.#inKey) {
+      // A key longer than every kept field name is truncated unmatched.
+      if (this.#text.length <= MAX_TOKEN_CODE_UNITS)
+        this.#text += chunk.slice(
+          0,
+          MAX_TOKEN_CODE_UNITS + 1 - this.#text.length,
+        );
+    } else if (this.#target !== undefined) {
+      this.#text += chunk;
+      if (token.name === "stringChunk")
+        this.#charge(chunk.length * 2, this.#text.length);
+      else if (this.#text.length > MAX_TOKEN_CODE_UNITS)
+        throw new Error(`${this.#target} is not a number Kuna writes`);
+    }
+    return true;
   }
 
   /** Decide where a scalar value goes, before any of it is assembled. */

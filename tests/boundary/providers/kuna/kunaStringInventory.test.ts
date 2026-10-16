@@ -192,6 +192,20 @@ it("refuses a kept string while it is assembled, before Kuna finishes it", async
   reader.destroy();
 });
 
+it("bounds keys and numbers: overlong keys match no field, overlong kept numbers reject", async () => {
+  const longKey = `count${"x".repeat(1024 * 1024)}`;
+  const ignored = wire({ ...document(), [longKey]: "@1" + "0".repeat(4096) });
+  expect((await read(ignored, 4096)).result).toMatchObject({
+    ok: true,
+    value: { items: [{}] },
+  });
+  const kept = wire({ ...document(), count: "@1" + "0".repeat(64) });
+  expect((await read(kept)).result).toMatchObject({
+    ok: false,
+    error: { reason: "count is not a number Kuna writes" },
+  });
+});
+
 it("drops ignored strings unassembled, without sampling headroom", async () => {
   const sampled = vi.mocked(v8.getHeapStatistics).mock.calls.length;
   const { result } = await read(
