@@ -8,6 +8,7 @@ import {
   buildNativePeFixture,
   managedPeFixtureTarget,
 } from "./ManagedPe.fixture.js";
+import { readManagedPeLayout } from "./ManagedPeReader.js";
 
 describe("managed artifact failure classification", () => {
   it("distinguishes native, malformed, and unsupported metadata", () => {
@@ -86,5 +87,46 @@ describe("managed artifact failure classification", () => {
         expect.objectContaining({ code: "invalid-row" }),
       ],
     });
+  });
+
+  it("reports artifact file coordinates for malformed metadata stream names", () => {
+    const valid = buildManagedPeFixture();
+    const pe = readManagedPeLayout(valid);
+    if (!pe.cli) throw new Error("Expected CLI directory");
+    const root = pe.rvaToOffset(
+      pe.cli.metadata.rva,
+      pe.cli.metadata.size,
+      "cli.metadata",
+    );
+    const relative =
+      Math.ceil((16 + valid.readUInt32LE(root + 12)) / 4) * 4 + 12;
+    const expected = root + relative;
+
+    for (const mode of ["non-printable", "unterminated"] as const) {
+      const bytes = Buffer.from(valid);
+      if (mode === "non-printable") bytes[expected] = 1;
+      else bytes.fill(0x41, expected, expected + 32);
+      const result = inspectManagedArtifactBytes(
+        bytes,
+        managedPeFixtureTarget(bytes),
+      );
+      expect(result.coverage.state).toBe("partial");
+      expect(result.classification.evidence[0]?.file_offset).toBe(expected);
+      const issue = result.coverage.issues[0];
+      expect(issue).toMatchObject({
+        code: "invalid-stream",
+        scope: "metadata.stream-name",
+        offset: expected,
+      });
+      if (mode === "non-printable") {
+        expect(issue?.detail).toBe(
+          "Metadata stream name is not printable ASCII",
+        );
+      } else {
+        expect(issue?.detail).toBe(
+          "Metadata stream name is missing a bounded terminator",
+        );
+      }
+    }
   });
 });
