@@ -108,7 +108,9 @@ providers need not expose identical state machines.
   Bind cleanup failures to their exact resource owner. Resolve current cleanup
   uncertainty only after that owner confirms release, while preserving the
   original failure and completed observations. Later failure composition must
-  report only resources whose cleanup remains unresolved.
+  report only resources whose cleanup remains unresolved. Carry cleanup
+  capabilities explicitly in typed outcomes so consumers can bind returned errors
+  to exact owners without reparsing diagnostic cause chains.
 - Await one-shot cleanup without discarding the completed result or primary
   diagnostic. Preserve partial observations, remaining resources, and the cleanup
   owner's recovery instructions. CLI adapters should reuse
