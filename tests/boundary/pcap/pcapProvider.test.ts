@@ -258,6 +258,7 @@ it.each(["capinfos", "tshark"] as const)(
     ).toBe(true);
     mayClean = true;
     await provider.close();
+    expect(result.error.cleanupIncomplete).toBe(false);
   },
 );
 
@@ -616,6 +617,7 @@ it.each([false, true])(
       spy.mockRestore();
     }
     await provider.close();
+    if (!result.ok) expect(result.error.cleanupIncomplete).toBe(false);
     await expect(
       readFile(join(retained!.path, "capture.pcap")),
     ).rejects.toMatchObject({ code: "ENOENT" });
