@@ -241,7 +241,11 @@ consumers; default-only controls cannot detect dropped request options.
 
 For descriptor-backed reads, inject a close failure after a successful read and
 after a primary read or cancellation failure. Verify that the exact descriptor
-remains owned, both failures survive, and a later close retries it. Include
+remains owned, both failures survive, and a later close retries it. Repeat
+admission attempts while close still fails: no additional descriptor or
+native command should start. Restore close and verify that the exact owner
+resolves the originating cleanup marker and allows later work, while the earlier
+failure remains available as a diagnostic. Include
 admission failure after opening the descriptor. If caller cancellation returns
 before an inspection settles, gate its final read or close and verify that
 session shutdown waits for the owned work and reports any retained resources.

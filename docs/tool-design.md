@@ -112,6 +112,10 @@ providers need not expose identical state machines.
   Admit the entire inspection once, including later reads and finalization.
   Helpers must borrow that admission or use an operation child scope; re-entering
   the same draining scope can make cleanup wait for its own caller.
+  Retry retained cleanup before admitting new work and keep admission blocked
+  while it remains unresolved. Link the originating cleanup error to its exact
+  owner so confirmed release resolves its cleanup marker while preserving the
+  earlier diagnostic. Shared CLI/MCP adapters cannot infer that confirmation.
 - Release child descriptors before removing their containing root. Retain a
   composite owner when either stage fails so retry preserves that ordering.
   A Windows command leader's exit does not establish Job Object closure. Keep
