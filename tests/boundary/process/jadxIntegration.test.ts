@@ -46,6 +46,7 @@ it("retains a failed input hash descriptor until provider shutdown retries it", 
     if (result.ok) throw new Error("Expected incomplete hash cleanup");
     expect(result.error.cause).toBeInstanceOf(AggregateError);
     await provider.close();
+    expect(result.error.cleanupIncomplete).toBe(false);
     expect(close).toHaveBeenCalledTimes(3);
     expect(owners[0]!.handle.fd).toBe(-1);
     expect(launches).toHaveLength(0);
@@ -117,12 +118,14 @@ it("drains hash descriptors even when session shutdown fails and retains its wor
         cleanupResources: [expect.any(String), workspace],
       },
     });
+    if (outcome.ok) throw new Error("Expected retained session cleanup");
     expect(fileCloseCalls).toBe(2);
     await expect(access(workspace)).resolves.toBeUndefined();
 
     sessionClose.mockRestore();
     fileClose.mockRestore();
     await provider.close();
+    expect(outcome.error.cleanupIncomplete).toBe(false);
     await verifyCleanup(launches);
   } finally {
     sessionClose.mockRestore();

@@ -490,6 +490,7 @@ test.each([false, true])(
     expect(await readFile(f.destination)).toEqual(f.png);
     expect(f.closeAttempts()).toBe(2);
     await f.provider.close();
+    expect(result.error.cleanupIncomplete).toBe(false);
     if (runtimePath !== undefined)
       await expect(
         readFile(join(runtimePath, "screen.png")),
@@ -525,6 +526,7 @@ test("keeps a sticky publication close failure until provider close retries its 
   await f.provider.close();
   expect(f.closeAttempts()).toBe(3);
   expect(linkedFailure.cleanupIncomplete).toBe(false);
+  expect(result.error.cleanupIncomplete).toBe(false);
   expect(await readFile(f.destination)).toEqual(f.png);
 });
 

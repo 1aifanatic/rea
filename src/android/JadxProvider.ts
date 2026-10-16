@@ -202,6 +202,7 @@ interface PendingCleanup {
   }[];
   readonly previousError: AnalysisError | undefined;
   readonly operationCause: unknown;
+  reportedError?: AnalysisError;
 }
 
 const cleanup = async (
@@ -411,8 +412,12 @@ export class JadxProvider implements AndroidAnalysisPort {
       this.#retained = undefined;
     }
     if (this.#pendingCleanup === undefined) return ok(undefined);
-    const result = await cleanup(this.#pendingCleanup);
-    if (result.ok) this.#pendingCleanup = undefined;
+    const pending = this.#pendingCleanup;
+    const result = await cleanup(pending);
+    if (result.ok) {
+      pending.reportedError?.resolveCleanup();
+      this.#pendingCleanup = undefined;
+    } else pending.reportedError ??= result.error;
     return result;
   }
 
