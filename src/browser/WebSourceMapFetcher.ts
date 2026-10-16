@@ -806,11 +806,11 @@ const originalModuleEdges = (
 /** Select parser semantics from the source URL path, excluding query/fragment. */
 const sourceParserPath = (source: string): string => {
   try {
-    return new URL(source).pathname;
+    return new URL(source, "https://rea.local/").pathname;
   } catch (cause: unknown) {
     // Unresolved source identities can still carry a useful relative path.
     void cause;
-    return source;
+    return source.split(/[?#]/u)[0] ?? source;
   }
 };
 
@@ -1058,13 +1058,16 @@ const resolveOriginalSource = (
   }
 };
 
-const sourceMediaType = (source: string | null): string =>
-  source?.endsWith(".ts") ||
-  source?.endsWith(".tsx") ||
-  source?.endsWith(".mts") ||
-  source?.endsWith(".cts")
+const sourceMediaType = (source: string | null): string => {
+  if (source === null) return "text/javascript";
+  const path = sourceParserPath(source);
+  return path.endsWith(".ts") ||
+    path.endsWith(".tsx") ||
+    path.endsWith(".mts") ||
+    path.endsWith(".cts")
     ? "text/typescript"
     : "text/javascript";
+};
 
 const originalDependency = (
   node: t.Node,
