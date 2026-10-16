@@ -368,7 +368,9 @@ const timerDelay = (candidate: TimerCandidate): number | null => {
   if (candidate.kind !== "schedule" || candidate.method === "setImmediate")
     return null;
   const delay = candidate.node.arguments[1];
-  return t.isNumericLiteral(delay) ? delay.value : null;
+  return t.isNumericLiteral(delay) && Number.isFinite(delay.value)
+    ? delay.value
+    : null;
 };
 
 const timerId = (candidate: TimerCandidate): string =>

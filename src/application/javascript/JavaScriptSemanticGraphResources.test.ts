@@ -346,6 +346,24 @@ it("uses unavailable evidence when no source produced semantic IR", () => {
   );
 });
 
+it("projects timer scheduling with overflowing nonfinite delay as null without aborting", () => {
+  const graph = graphFor(`
+    function greet() { return "hello"; }
+    setTimeout(greet, 1e1000);
+  `);
+
+  const timerNode = graph.nodes.find(({ kind }) => kind === "timer");
+  expect(timerNode).toBeDefined();
+  expect(timerNode?.properties).toEqual({
+    delay_milliseconds: null,
+    method: "setTimeout",
+  });
+  const greetNode = graph.nodes.find(
+    ({ kind, label }) => kind === "function" && label === "greet",
+  );
+  expect(greetNode).toBeDefined();
+});
+
 const emptyAnalysis = (): JavaScriptArtifactAnalysis => ({
   files: [],
   packages: [],
