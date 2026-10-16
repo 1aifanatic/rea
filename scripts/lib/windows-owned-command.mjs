@@ -1,10 +1,10 @@
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const sourceWindowsProcess = fileURLToPath(
-  new URL("../../src/windows/WindowsOwnedProcess.ts", import.meta.url),
-);
+const sourceWindowsProcess = new URL(
+  "../../src/windows/WindowsOwnedProcess.ts",
+  import.meta.url,
+).href;
 
 /** Load the source owner without requiring a generated dist tree. */
 export async function loadWindowsOwnedProcessClass() {
