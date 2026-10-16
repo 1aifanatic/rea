@@ -109,4 +109,33 @@ describe("native addon loader provenance", () => {
       ]);
     },
   );
+
+  it("retains native addon bindings from optional require calls", () => {
+    const analysis = analyzeJavaScriptStaticSource(`
+      const addon = require?.("./addon.node");
+      const helper = require?.("./addon.node")?.helper;
+      module.exports = require?.("./addon.node");
+    `);
+    expect(analysis.electron.native_addon_bindings).toEqual([
+      expect.objectContaining({
+        specifier: "./addon.node",
+        binding_kind: "require",
+        module_kind: "require",
+        namespace_access: true,
+      }),
+      expect.objectContaining({
+        specifier: "./addon.node",
+        binding_kind: "require",
+        module_kind: "require",
+        members: ["helper"],
+        namespace_access: false,
+      }),
+      expect.objectContaining({
+        specifier: "./addon.node",
+        binding_kind: "re-export",
+        module_kind: "require",
+        namespace_access: true,
+      }),
+    ]);
+  });
 });
