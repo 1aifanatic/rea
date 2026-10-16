@@ -163,7 +163,7 @@ const inspectReExport = (
     context,
     node,
     specifier: required.specifier,
-    kind: "re-export",
+    kind: node.operator === "=" ? "re-export" : "require",
     moduleKind: "require",
     ...required.access,
   });

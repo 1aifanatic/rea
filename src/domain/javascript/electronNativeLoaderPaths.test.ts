@@ -109,4 +109,25 @@ describe("native addon loader provenance", () => {
       ]);
     },
   );
+
+  it.each([
+    ['exports.value += require("./fake.node");', "require"],
+    ['exports.value -= require("./fake.node");', "require"],
+    ['exports.value *= require("./fake.node");', "require"],
+    ['exports.value = require("./fake.node");', "re-export"],
+    ['const addon = require("./fake.node");', "require"],
+  ] as const)(
+    "classifies %s as binding_kind %s",
+    (source, expectedBindingKind) => {
+      const analysis = analyzeJavaScriptStaticSource(source);
+      expect(analysis.parse_status).toBe("complete");
+      expect(analysis.electron.native_addon_bindings).toEqual([
+        expect.objectContaining({
+          specifier: "./fake.node",
+          binding_kind: expectedBindingKind,
+          module_kind: "require",
+        }),
+      ]);
+    },
+  );
 });
