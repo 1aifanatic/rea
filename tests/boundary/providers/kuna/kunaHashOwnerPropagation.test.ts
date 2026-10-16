@@ -12,6 +12,8 @@ const injected = vi.hoisted(() => ({
   releaseCloseFailures: false,
   closeCalls: 0,
   failCloseReadStage: undefined as "fingerprint" | "shebang" | undefined,
+  failReadStage: undefined as "fingerprint" | "shebang" | undefined,
+  abortOnReadFailure: undefined as (() => void) | undefined,
   handles: [] as import("node:fs/promises").FileHandle[],
 }));
 
@@ -21,6 +23,8 @@ afterEach(async () => {
   injected.releaseCloseFailures = false;
   injected.closeCalls = 0;
   injected.failCloseReadStage = undefined;
+  injected.failReadStage = undefined;
+  injected.abortOnReadFailure = undefined;
   for (const handle of injected.handles.splice(0))
     if (handle.fd >= 0) await handle.close();
 });
@@ -38,10 +42,12 @@ vi.mock("../../../../src/filesystem/RegularFile.js", async (importOriginal) => {
         injected.handles.push(handle);
         const failNextClose = injected.failNextClose;
         const failCloseReadStage = injected.failCloseReadStage;
+        const failReadStage = injected.failReadStage;
         if (
           !failNextClose &&
           !injected.holdCloseFailures &&
-          !failCloseReadStage
+          !failCloseReadStage &&
+          !failReadStage
         )
           return handle;
         injected.failNextClose = false;
@@ -59,6 +65,14 @@ vi.mock("../../../../src/filesystem/RegularFile.js", async (importOriginal) => {
             length: number,
             position: number,
           ) => {
+            if (
+              (failReadStage === "fingerprint" && length > 2) ||
+              (failReadStage === "shebang" && length === 2)
+            ) {
+              readStageMatched = true;
+              injected.abortOnReadFailure?.();
+              throw new Error("injected read fault");
+            }
             if (failCloseReadStage === "fingerprint" && length > 2)
               readStageMatched = true;
             if (failCloseReadStage === "shebang" && length === 2)
@@ -86,6 +100,7 @@ vi.mock("../../../../src/filesystem/RegularFile.js", async (importOriginal) => {
 import { AnalysisProviderRegistry } from "../../../../src/application/binary/AnalysisProviderRegistry.js";
 import { composeBinarySession } from "../../../../src/application/binary/BinarySessionComposition.js";
 import { KunaTargetCommands } from "../../../../src/kuna/KunaTargetCommands.js";
+import { KunaProjectCache } from "../../../../src/kuna/KunaProjectCache.js";
 import { inspectKunaProvider } from "../../../../src/kuna/KunaDoctor.js";
 import { inspectKunaInstallationOwned } from "./kunaFileCloseOwner.js";
 import { fakeKunaCalls } from "./fakeKuna.js";
@@ -124,6 +139,132 @@ it
     } finally {
       injected.failCloseReadStage = undefined;
       const closed = await client.close();
+      if (!closed.ok) throw closed.error;
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "keeps cancellation primary when an executable hash read and close both fail",
+  async () => {
+    const fixture = await session("rea-kuna-cancelled-read-close-");
+    const installed = await inspectKunaInstallationOwned({
+      REA_KUNA_COMMAND: fixture.kuna,
+      REA_KUNA_CACHE_DIR: fixture.cacheRoot,
+    });
+    if (!installed.ok) throw new Error(installed.error.reason);
+    const controller = new AbortController();
+    const commands = new KunaTargetCommands(fixture.target, {
+      signal: controller.signal,
+    });
+    injected.failReadStage = "fingerprint";
+    injected.abortOnReadFailure = () => controller.abort();
+    let originatingError:
+      | import("../../../../src/domain/analysisErrorBase.js").AnalysisError
+      | undefined;
+    try {
+      const result = await commands.run({
+        installation: installed.value,
+        operation: "list_procedures",
+        arguments: (input) => ["functions", input, "--json"],
+        timeoutMs: 10_000,
+        outputBytes: 1024 * 1024,
+        signal: controller.signal,
+      });
+      if (result.ok) throw new Error("injected cancelled read passed");
+      originatingError = result.error;
+      expect(result.error).toMatchObject({
+        _tag: "AnalysisCancelledError",
+        cleanupIncomplete: true,
+        cleanupResources: [installed.value.executable],
+      });
+    } finally {
+      injected.failReadStage = undefined;
+      injected.abortOnReadFailure = undefined;
+      const closed = await commands.close();
+      if (!closed.ok) throw closed.error;
+      expect(originatingError?.cleanupIncomplete).toBe(false);
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "resolves an export's typed read failure after the cache retries its exact descriptor",
+  async () => {
+    const fixture = await session("rea-kuna-export-read-close-");
+    const installed = await inspectKunaInstallationOwned({
+      REA_KUNA_COMMAND: fixture.kuna,
+      REA_KUNA_CACHE_DIR: fixture.cacheRoot,
+    });
+    if (!installed.ok) throw new Error(installed.error.reason);
+    const cache = new KunaProjectCache(fixture.cacheRoot, {
+      maxBytes: 64 * 1024 ** 2,
+    });
+    injected.failReadStage = "fingerprint";
+    try {
+      const result = await cache.build({
+        installation: installed.value,
+        targetPath: fixture.target.path,
+        targetSha256: fixture.target.sha256,
+      });
+      if (result.ok) throw new Error("injected export hash read passed");
+      const originatingError = result.error;
+      expect(originatingError).toMatchObject({
+        cleanupIncomplete: true,
+        cleanupResources: [fixture.kuna],
+      });
+      expect(originatingError.userMessage).toContain("injected read fault");
+      expect(await cache.close()).toEqual({ ok: true, value: null });
+      expect(originatingError.cleanupIncomplete).toBe(false);
+    } finally {
+      injected.failReadStage = undefined;
+      const closed = await cache.close();
+      if (!closed.ok) throw closed.error;
+    }
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "preserves a hash read failure when closing its descriptor also fails",
+  async () => {
+    const fixture = await session("rea-kuna-read-and-close-failure-");
+    const installed = await inspectKunaInstallationOwned({
+      REA_KUNA_COMMAND: fixture.kuna,
+      REA_KUNA_CACHE_DIR: fixture.cacheRoot,
+    });
+    if (!installed.ok) throw new Error(installed.error.reason);
+    const controller = new AbortController();
+    const commands = new KunaTargetCommands(fixture.target, {
+      signal: controller.signal,
+    });
+    injected.failReadStage = "fingerprint";
+    try {
+      const result = await commands.run({
+        installation: installed.value,
+        operation: "list_procedures",
+        arguments: (input) => ["functions", input, "--json"],
+        timeoutMs: 10_000,
+        outputBytes: 1024 * 1024,
+        signal: controller.signal,
+      });
+      if (result.ok) throw new Error("injected hash read failure passed");
+      expect(result.error.cleanupIncomplete).toBe(true);
+      expect(result.error.userMessage).toContain("injected read fault");
+      expect(result.error.cause).toBeInstanceOf(AggregateError);
+      const errors = (result.error.cause as AggregateError).errors;
+      expect(errors[0]).toMatchObject({
+        cause: { message: "injected read fault" },
+      });
+      expect(errors[1]).toMatchObject({
+        cleanupResources: [installed.value.executable],
+      });
+      expect(result.error.cleanupResources).toEqual([
+        installed.value.executable,
+      ]);
+    } finally {
+      injected.failReadStage = undefined;
+      controller.abort();
+      const closed = await commands.close();
       if (!closed.ok) throw closed.error;
     }
   },

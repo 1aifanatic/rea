@@ -27,7 +27,6 @@ import type { KunaRunRelease } from "./KunaRunSlots.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
-import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import type { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 
 interface Workspace {
@@ -130,16 +129,16 @@ export class KunaTargetCommands {
           retained = true;
           return err(outcome.error);
         }
+        const fileFailure =
+          outcome.kind === "failed" ? outcome.fileCleanupFailure : undefined;
+        if (outcome.kind === "ok")
+          return ok({ ...outcome.snapshot, input: workspace.value.input });
         if (
-          outcome.kind === "failed" &&
-          outcome.error instanceof ProviderCleanupError &&
-          outcome.error.cause instanceof RegularFileCleanupFailure &&
-          outcome.error.cause.owner === failedHashClose?.owner
+          fileFailure !== undefined &&
+          fileFailure.owner === failedHashClose?.owner
         )
           failedHashClose.lease.bindCleanupError(outcome.error);
-        return outcome.kind === "ok"
-          ? ok({ ...outcome.snapshot, input: workspace.value.input })
-          : err(outcome.error);
+        return err(outcome.error);
       });
     } finally {
       if (!retained) releaseRun?.();

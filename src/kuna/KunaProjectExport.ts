@@ -17,6 +17,7 @@ import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
 import {
   copyAndHash,
   KUNA_INVENTORY_OUTPUT_BYTES,
+  kunaFileCleanupError,
   runKunaCommand,
   type KunaProcessLauncher,
 } from "./KunaCommand.js";
@@ -85,6 +86,7 @@ export type KunaExportOutcome =
   | {
       readonly kind: "done";
       readonly result: Result<KunaExport, AnalysisError>;
+      readonly fileCleanupFailure?: RegularFileCleanupFailure;
     }
   | {
       readonly kind: "retained";
@@ -122,22 +124,11 @@ const isMissing = (cause: unknown): boolean =>
 /** Map an unexpected failure to a typed one, preferring cancellation. */
 export const kunaExportFailure = (
   cause: unknown,
-  signal: AbortSignal,
+  signal: AbortSignal | undefined,
 ): AnalysisError => {
   if (cause instanceof RegularFileCleanupFailure)
-    return new ProviderCleanupError(
-      KUNA_PROVIDER_ID,
-      [cause.path],
-      {
-        reason: String(cause.cleanupCause),
-        primary_error:
-          cause.outcome.kind === "failed"
-            ? String(cause.outcome.cause)
-            : "none",
-      },
-      { cause, operation: KUNA_EXPORT_OPERATION },
-    );
-  if (signal.aborted)
+    return kunaFileCleanupError(cause, KUNA_EXPORT_OPERATION, signal);
+  if (signal?.aborted === true)
     return new AnalysisCancelledError(KUNA_EXPORT_OPERATION, { cause });
   if (cause instanceof AnalysisError) return cause;
   return new ProviderAdapterError(KUNA_PROVIDER_ID, KUNA_EXPORT_OPERATION, {
@@ -231,7 +222,13 @@ export const exportKunaProject = async (
               error: outcome.error,
               owner: outcome.owner,
             } as const)
-          : ({ kind: "done", result: err(outcome.error) } as const),
+          : ({
+              kind: "done",
+              result: err(outcome.error),
+              ...(outcome.fileCleanupFailure === undefined
+                ? {}
+                : { fileCleanupFailure: outcome.fileCleanupFailure }),
+            } as const),
     };
   };
 

@@ -4,7 +4,8 @@ import { stat } from "node:fs/promises";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-import type { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import {
   AnalysisCancelledError,
   AnalysisResourceConstraintError,
@@ -69,7 +70,11 @@ export interface KunaCommandRequest {
  */
 export type KunaCommandOutcome =
   | { readonly kind: "ok"; readonly snapshot: ProviderProcessSnapshot }
-  | { readonly kind: "failed"; readonly error: AnalysisError }
+  | {
+      readonly kind: "failed";
+      readonly error: AnalysisError;
+      readonly fileCleanupFailure?: RegularFileCleanupFailure;
+    }
   | {
       readonly kind: "retained";
       readonly error: ProviderCleanupError;
@@ -79,6 +84,48 @@ export type KunaCommandOutcome =
 
 const message = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
+
+/** Preserve the operation's typed failure while attaching descriptor cleanup. */
+export const kunaFileCleanupError = (
+  failure: RegularFileCleanupFailure,
+  operation: string,
+  signal?: AbortSignal,
+): AnalysisError => {
+  const cleanup = new ProviderCleanupError(
+    KUNA_PROVIDER_ID,
+    [failure.path],
+    { reason: message(failure.cleanupCause) },
+    { cause: failure, operation },
+  );
+  if (failure.outcome.kind === "completed") return cleanup;
+  const primaryCause = failure.outcome.cause;
+  const primary =
+    primaryCause instanceof AnalysisError
+      ? primaryCause
+      : signal?.aborted === true
+        ? new AnalysisCancelledError(operation, { cause: primaryCause })
+        : new ProviderAdapterError(KUNA_PROVIDER_ID, operation, {
+            cause: primaryCause,
+            userMessage: `Kuna ${operation} failed: ${message(primaryCause)}`,
+          });
+  if (primary instanceof AnalysisCancelledError)
+    return new AnalysisCancelledError(operation, {
+      cause: new AggregateError(
+        [primary, cleanup],
+        "Kuna operation was cancelled and descriptor cleanup failed",
+        { cause: primary },
+      ),
+      cleanup: {
+        reason: cleanup.message,
+        resources: [failure.path],
+      },
+      ...(primary.capturedOutput === undefined
+        ? {}
+        : { capturedOutput: primary.capturedOutput }),
+      partialObservation: primary.partialObservation,
+    });
+  return analysisErrorWithCleanupFailure(primary, cleanup, operation);
+};
 
 /** File metadata that, unchanged, lets a verified digest stand without re-hashing. */
 const verifiedExecutables = new Map<
@@ -141,16 +188,13 @@ export const runKunaCommand = async (
         }),
       };
   } catch (cause: unknown) {
-    if (cause instanceof RegularFileCleanupFailure)
+    if (cause instanceof RegularFileCleanupFailure) {
       return {
         kind: "failed",
-        error: new ProviderCleanupError(
-          KUNA_PROVIDER_ID,
-          [cause.path],
-          { reason: String(cause.cleanupCause) },
-          { cause, operation: request.operation },
-        ),
+        error: kunaFileCleanupError(cause, request.operation, request.signal),
+        fileCleanupFailure: cause,
       };
+    }
     return {
       kind: "failed",
       error: request.signal.aborted
