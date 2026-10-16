@@ -22,7 +22,12 @@ export interface FakeKunaBehavior {
     | { readonly stdout: string }
     | { readonly exit: number }
     | { readonly ignoreTerm: true };
-  readonly inventory?: "ok" | "not-json" | "hang";
+  readonly inventory?:
+    | "ok"
+    | "not-json"
+    | "hang"
+    | "exit-failure"
+    | "exit-silent";
   readonly inventoryImports?: boolean;
   readonly project?:
     | "ok"
@@ -88,6 +93,8 @@ if (args[0] === "--version") {
   const mode = behavior.inventory ?? "ok";
   if (mode === "hang") hang();
   else if (mode === "not-json") process.stdout.write("functions: 2\n");
+  else if (mode === "exit-failure") { process.stderr.write("functions failed\n"); process.exit(1); }
+  else if (mode === "exit-silent") { process.exit(1); }
   else {
     const listed = [...functions, ...(behavior.inventoryImports === false ? [] : [{ name: "puts", addr: "0x2000" }])].map((fn) => ({ name: fn.name, address: parseInt(fn.addr, 16), address_hex: fn.addr, aliases: [], object_location: null, size: fn.name === "puts" ? 0 : 16 }));
     setTimeout(() => process.stdout.write(JSON.stringify({ binary: args[1], count: listed.length, total: listed.length, error: null, functions: listed }, null, 2) + "\n"), behavior.inventoryDelayMs ?? 0);

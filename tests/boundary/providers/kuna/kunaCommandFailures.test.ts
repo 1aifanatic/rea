@@ -118,3 +118,81 @@ it("says why Kuna cannot answer instead of a generic unavailable message", async
     expect(await client.close()).toEqual({ ok: true, value: null });
   }
 });
+
+it("falls back to cause message when a nonzero Kuna exit provides no stderr", async () => {
+  const { kuna, target, cacheRoot } = await session("rea-kuna-empty-stderr-", {
+    inventory: "exit-silent",
+  });
+  const installed = await inspectKunaInstallation({
+    REA_KUNA_COMMAND: kuna,
+    REA_KUNA_CACHE_DIR: cacheRoot,
+  });
+  if (!installed.ok) throw new Error(installed.error.reason);
+  const controller = new AbortController();
+  const commands = new KunaTargetCommands(target, {
+    signal: controller.signal,
+  });
+  try {
+    const result = await commands.run({
+      installation: installed.value,
+      operation: "list_procedures",
+      arguments: (input) => ["functions", input, "--json"],
+      timeoutMs: 10_000,
+      outputBytes: 4096,
+      signal: controller.signal,
+    });
+    if (result.ok) throw new Error("silent exit unexpectedly succeeded");
+    expect(result.error).toMatchObject({
+      _tag: "ProviderAdapterError",
+      userMessage:
+        "kuna functions failed with exit code 1: Command failed; inspect its exit status and diagnostics.",
+      capturedOutput: {
+        stderr: "",
+        exit_code: 1,
+      },
+    });
+  } finally {
+    controller.abort();
+    expect(await commands.close()).toEqual({ ok: true, value: null });
+  }
+});
+
+it("keeps actual stderr diagnostic when a nonzero Kuna exit provides stderr", async () => {
+  const { kuna, target, cacheRoot } = await session(
+    "rea-kuna-stderr-control-",
+    {
+      inventory: "exit-failure",
+    },
+  );
+  const installed = await inspectKunaInstallation({
+    REA_KUNA_COMMAND: kuna,
+    REA_KUNA_CACHE_DIR: cacheRoot,
+  });
+  if (!installed.ok) throw new Error(installed.error.reason);
+  const controller = new AbortController();
+  const commands = new KunaTargetCommands(target, {
+    signal: controller.signal,
+  });
+  try {
+    const result = await commands.run({
+      installation: installed.value,
+      operation: "list_procedures",
+      arguments: (input) => ["functions", input, "--json"],
+      timeoutMs: 10_000,
+      outputBytes: 4096,
+      signal: controller.signal,
+    });
+    if (result.ok) throw new Error("failure exit unexpectedly succeeded");
+    expect(result.error).toMatchObject({
+      _tag: "ProviderAdapterError",
+      userMessage: "kuna functions failed with exit code 1: functions failed",
+      capturedOutput: {
+        stderr: "functions failed\n",
+        exit_code: 1,
+      },
+    });
+  } finally {
+    controller.abort();
+    expect(await commands.close()).toEqual({ ok: true, value: null });
+  }
+});
