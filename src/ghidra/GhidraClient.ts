@@ -16,6 +16,10 @@ import { silentLogger } from "../logger.js";
 import type { Logger } from "pino";
 import { PendingOperations } from "../process/PendingOperations.js";
 import { ABORTED, waitForAbortable } from "../process/AbortablePromise.js";
+import {
+  SharedStartupAttempt,
+  STARTUP_OWNER_CLOSED,
+} from "../process/SharedStartupAttempt.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 import { ProviderStartupDeadline } from "../process/ProviderDeadline.js";
 import { ProviderRunLineage } from "../process/ProviderRunLineage.js";
@@ -82,12 +86,7 @@ import { ghidraSessionRoot } from "./GhidraSessionRoot.js";
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const SESSION_ROOT = ghidraSessionRoot();
 
-interface GhidraStartupAttempt {
-  readonly controller: AbortController;
-  readonly promise: Promise<GhidraStartResult>;
-  waiters: number;
-  settled: boolean;
-}
+type GhidraStartupAttempt = SharedStartupAttempt<GhidraStartResult>;
 
 /** Closed Java-bridge operation union callable after the exact handshake. */
 export type GhidraOperation =
@@ -129,7 +128,6 @@ export class GhidraClient {
   #outputDrainIncomplete = false;
   #lastDiagnostics: Readonly<Record<string, JsonValue>> = {};
   #startupAttempt: GhidraStartupAttempt | undefined;
-  #ready = false;
   #closePromise: Promise<void> | undefined;
   readonly #failure = bindGhidraSessionFailure(
     () => this.#diagnostics(),
@@ -232,8 +230,13 @@ export class GhidraClient {
         err(this.#failure("cancelled", "Ghidra startup wait was cancelled")),
       );
     if (this.#closePromise !== undefined)
-      return this.#closePromise.then(
-        () => this.start(signal),
+      return waitForAbortable(this.#closePromise, signal).then(
+        (closed) =>
+          closed === ABORTED
+            ? err(
+                this.#failure("cancelled", "Ghidra startup wait was cancelled"),
+              )
+            : this.start(signal),
         (cause: unknown) =>
           err(
             new GhidraSessionError(
@@ -246,28 +249,23 @@ export class GhidraClient {
       );
     const current = this.#startupAttempt;
     if (current !== undefined) {
-      if (current.controller.signal.aborted)
+      if (current.signal.aborted)
         return this.#retryAfterAbortedStartup(current, signal);
       return this.#waitForStartup(current, signal);
     }
-    const controller = new AbortController();
-    const promise = this.#start(controller.signal);
-    const attempt: GhidraStartupAttempt = {
-      controller,
-      promise,
-      waiters: 0,
-      settled: false,
-    };
+    const attempt = new SharedStartupAttempt((signal) => this.#start(signal));
+    const { promise } = attempt;
     this.#startupAttempt = attempt;
     void promise.then(
       (result) => {
-        attempt.settled = true;
-        if (result.ok) this.#ready = true;
-        else if (this.#startupAttempt === attempt)
+        if (
+          !result.ok &&
+          this.#startupAttempt === attempt &&
+          result.error.cleanupFailure === undefined
+        )
           this.#startupAttempt = undefined;
       },
       (cause: unknown) => {
-        attempt.settled = true;
         this.#logger.debug(
           { error: cause instanceof Error ? cause.message : String(cause) },
           "Ghidra startup promise rejected during bookkeeping",
@@ -278,69 +276,15 @@ export class GhidraClient {
     return this.#waitForStartup(attempt, signal);
   }
 
-  /** Each caller waits independently; the final departing waiter stops startup. */
+  /** Preserve cleanup failures for the last caller leaving shared startup. */
   async #waitForStartup(
     attempt: GhidraStartupAttempt,
     signal: AbortSignal | undefined,
   ): Promise<GhidraStartResult> {
-    attempt.waiters += 1;
-    let waiting = true;
-    let onAbort: (() => void) | undefined;
-    const leave = (): void => {
-      if (!waiting) return;
-      waiting = false;
-      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
-      attempt.waiters -= 1;
-    };
-    return new Promise<GhidraStartResult>((resolve, reject) => {
-      onAbort = () => {
-        if (!waiting) return;
-        leave();
-        if (attempt.waiters > 0) {
-          resolve(
-            err(
-              this.#failure("cancelled", "Ghidra startup wait was cancelled"),
-            ),
-          );
-          return;
-        }
-        if (!attempt.settled && this.#startupAttempt === attempt)
-          attempt.controller.abort();
-        // With no remaining caller, this waiter owns the last cleanup result.
-        // It must retain the startup failure's cleanup facts before returning.
-        void attempt.promise.then(
-          (result) =>
-            resolve(
-              result.ok
-                ? err(
-                    this.#failure(
-                      "cancelled",
-                      "Ghidra startup wait was cancelled",
-                    ),
-                  )
-                : result,
-            ),
-          reject,
-        );
-      };
-      if (signal?.aborted === true) {
-        onAbort();
-      } else {
-        signal?.addEventListener("abort", onAbort, { once: true });
-        void attempt.promise.then(
-          (result) => {
-            if (!waiting) return;
-            leave();
-            resolve(result);
-          },
-          (cause: unknown) => {
-            if (!waiting) return;
-            leave();
-            reject(cause);
-          },
-        );
-      }
-    });
+    const waited = await attempt.wait(signal);
+    if (waited.status === "completed") return waited.value;
+    if (waited.status === "stopped" && !waited.value.ok) return waited.value;
+    return err(this.#failure("cancelled", "Ghidra startup wait was cancelled"));
   }
 
   /** Wait for abandoned startup cleanup before retrying under the new caller. */
@@ -563,12 +507,19 @@ export class GhidraClient {
     }
   }
 
+  /** Read completion from the current attempt; no independent readiness flag. */
+  #startupSucceeded(): boolean {
+    const startup = this.#startupAttempt?.settlement;
+    return startup?.status === "completed" && startup.value.ok;
+  }
+
   /** True only after the authenticated startup handshake has completed. */
   isReady(): boolean {
     return (
-      this.#ready &&
+      this.#startupSucceeded() &&
       this.#socket !== undefined &&
       !this.#socket.destroyed &&
+      !this.#closing &&
       this.#closePromise === undefined
     );
   }
@@ -631,9 +582,8 @@ export class GhidraClient {
   }
 
   #requestClose(forceStop: boolean): Promise<void> {
-    this.#ready = false;
     const starting = this.#startupAttempt;
-    starting?.controller.abort();
+    starting?.close();
     this.#closePromise ??= Promise.resolve().then(() =>
       this.#close(starting, forceStop),
     );
@@ -661,12 +611,10 @@ export class GhidraClient {
         ? "exited"
         : this.#socket?.destroyed === true
           ? "unreachable"
-          : this.#startupAttempt === undefined &&
-              (this.#process !== undefined ||
-                this.#socket !== undefined ||
-                this.#runtimeRoot !== undefined ||
-                this.#socketRoot !== undefined ||
-                this.#snapshotOwners.size > 0)
+          : !this.#startupSucceeded() &&
+              (this.#startupAttempt === undefined ||
+                this.#startupAttempt.settled) &&
+              this.#hasOwnedResources()
             ? "unknown"
             : undefined;
     if (state === undefined) return undefined;
@@ -690,30 +638,43 @@ export class GhidraClient {
   }
 
   async #start(signal: AbortSignal): Promise<GhidraStartResult> {
-    if (this.#socket === undefined && this.#runtimeRoot === undefined) {
-      this.#lastDiagnostics = {};
-      this.#processSnapshot = undefined;
-      this.#startupOutputCheckpoint = undefined;
-      this.#activeOutputCheckpoint = undefined;
-      this.#outputDrainPromise = undefined;
-      this.#outputDrainIncomplete = false;
-    }
     if (signal.aborted)
       return err(this.#failure("cancelled", "Ghidra startup was cancelled"));
-    if (this.#socket !== undefined || this.#runtimeRoot !== undefined)
+    if (this.#hasOwnedResources())
       return err(this.#failure("protocol", "Ghidra client is already started"));
+    this.#lastDiagnostics = {};
+    this.#processSnapshot = undefined;
+    this.#startupOutputCheckpoint = undefined;
+    this.#activeOutputCheckpoint = undefined;
+    this.#outputDrainPromise = undefined;
+    this.#outputDrainIncomplete = false;
     const deadline = new ProviderStartupDeadline(
       this.#options.startupTimeoutMs,
       signal,
     );
     try {
-      return await this.#startWithin(deadline);
+      const result = await this.#startWithin(deadline);
+      return result.ok && deadline.signal.aborted
+        ? this.#startupInterrupted(deadline)
+        : result;
     } catch (cause: unknown) {
       if (cause instanceof GhidraSessionError) return err(cause);
       throw cause;
     } finally {
       deadline.dispose();
     }
+  }
+
+  /** Every retained cleanup capability blocks replacement by a new startup. */
+  #hasOwnedResources(): boolean {
+    return (
+      this.#process !== undefined ||
+      this.#launch !== undefined ||
+      this.#socket !== undefined ||
+      this.#runtimeRoot !== undefined ||
+      this.#socketRoot !== undefined ||
+      this.#snapshotOwners.size > 0
+    );
   }
 
   async #startWithin(
@@ -1120,6 +1081,12 @@ export class GhidraClient {
     deadline: ProviderStartupDeadline,
     cause?: unknown,
   ): GhidraSessionError {
+    if (deadline.signal.reason === STARTUP_OWNER_CLOSED)
+      return this.#failure(
+        "process",
+        "Ghidra session closed during startup",
+        cause,
+      );
     return deadline.interruption === "cancelled"
       ? this.#failure("cancelled", "Ghidra startup was cancelled", cause)
       : this.#failure("timeout", "Ghidra startup deadline elapsed", cause, {
