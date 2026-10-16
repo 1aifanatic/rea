@@ -169,8 +169,8 @@ const collectOwnedCommand = async (
     limits.stdout,
     AbortSignal.any([signal, abandoned.signal]),
   );
-  void consumed?.then((failed) => {
-    if (failed !== undefined) processFailure ??= failed;
+  void consumed.then((failed) => {
+    processFailure ??= failed;
   });
   let failure: OwnedCommandFailure | undefined;
   try {
@@ -195,11 +195,8 @@ const collectOwnedCommand = async (
       await waitForAbortableDelay(25, signal);
     }
     // Output has closed, but the sink may still be parsing what it buffered.
-    if (
-      consumed !== undefined &&
-      (await waitForAbortable(consumed, signal)) !== ABORTED
-    )
-      processFailure ??= await consumed;
+    const sinkFailure = await waitForAbortable(consumed, signal);
+    if (sinkFailure !== ABORTED) processFailure ??= sinkFailure;
     const snapshot = supervisor.snapshot();
     const interruption = deadline.interruption;
     if (interruption !== undefined)
@@ -247,7 +244,8 @@ const collectOwnedCommand = async (
             { cause },
           );
   }
-  if (failure !== undefined) abandoned.abort();
+  // A finished sink ignores this; an unfinished one is destroyed.
+  abandoned.abort();
   const stopped = await supervisor.stop();
   const snapshot = supervisor.snapshot();
   if (stopped.status === "incomplete" && retainCleanup !== undefined)
@@ -298,8 +296,8 @@ const consumeStdout = (
   stdout: Readable | null,
   sink: Writable | undefined,
   signal: AbortSignal,
-): Promise<string | undefined> | undefined => {
-  if (sink === undefined) return undefined;
+): Promise<string | undefined> => {
+  if (sink === undefined) return Promise.resolve(undefined);
   if (stdout === null) {
     sink.destroy();
     return Promise.resolve("stdout stream is unavailable");

@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
 import { getHeapStatistics } from "node:v8";
 
-import { getManyValues, isMany, none } from "stream-chain/defs.js";
-import { jsonParser, type Token } from "stream-json/core/parser.js";
+import { getManyValues, isMany, none, type Many } from "stream-chain/defs.js";
+import * as streamJsonParser from "stream-json/core/parser.js";
+import type { ParserOptions, Token } from "stream-json/core/parser.js";
 
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
@@ -12,6 +13,17 @@ import {
 } from "../domain/analysisErrorCore.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { kunaAddressFromJsonNumber } from "./KunaJson.js";
+
+/**
+ * stream-json 3's synchronous tokenizer behind `parser`, which its
+ * declarations omit. Each call returns the tokens `text` completes; `none`
+ * flushes the end of input.
+ */
+const { jsonParser } = streamJsonParser as unknown as {
+  readonly jsonParser: (
+    options: ParserOptions,
+  ) => (text: string | typeof none) => Many<Token> | typeof none;
+};
 
 /** One array of flat row objects in a Kuna JSON document. */
 export interface KunaJsonRows {
@@ -222,14 +234,18 @@ export abstract class KunaJsonDocumentReader extends Writable {
       for (const token of getManyValues(tokens)) this.#consume(token);
   }
 
+  /** Consume a token inside an ignored value; false once none is open. */
+  #skip(token: Token): boolean {
+    if (this.#skipping === 0) return false;
+    if (token.name === "startObject" || token.name === "startArray")
+      this.#skipping += 1;
+    else if (token.name === "endObject" || token.name === "endArray")
+      this.#skipping -= 1;
+    return true;
+  }
+
   #consume(token: Token): void {
-    if (this.#skipping > 0) {
-      if (token.name === "startObject" || token.name === "startArray")
-        this.#skipping += 1;
-      else if (token.name === "endObject" || token.name === "endArray")
-        this.#skipping -= 1;
-      return;
-    }
+    if (this.#skip(token)) return;
     switch (token.name) {
       case "keyValue":
         this.#key = token.value;
@@ -238,9 +254,7 @@ export abstract class KunaJsonDocumentReader extends Writable {
         this.#aim("string");
         return;
       case "stringChunk":
-        if (this.#target === undefined) return;
-        this.#text += token.value;
-        this.#charge(token.value.length * 2, this.#text.length);
+        this.#appendText(token.value);
         return;
       case "endString":
         if (this.#target !== undefined)
@@ -268,6 +282,13 @@ export abstract class KunaJsonDocumentReader extends Writable {
       default:
         throw new Error(`unexpected JSON ${token.name}`);
     }
+  }
+
+  /** Keep a chunk of the string being read, admitting it as it grows. */
+  #appendText(chunk: string): void {
+    if (this.#target === undefined) return;
+    this.#text += chunk;
+    this.#charge(chunk.length * 2, this.#text.length);
   }
 
   /** Decide where a scalar value goes, before any of it is assembled. */
@@ -343,6 +364,34 @@ export abstract class KunaJsonDocumentReader extends Writable {
     return frame.values;
   }
 
+  /** Open a root member: rows, a section, or a value this reader skips. */
+  #openMember(
+    kind: "object" | "array",
+    key: string,
+    root: Record<string, unknown>,
+  ): void {
+    const rows = this.document.rows.get(key);
+    const section = this.document.sections.get(key);
+    if (rows !== undefined) {
+      if (kind !== "array" || this.#rowsSeen.has(key))
+        throw new Error(`${this.label} rows ${key} are not one array`);
+      this.#frames.push({ kind: "rows", name: key, spec: rows });
+    } else if (section !== undefined) {
+      if (kind !== "object") throw new Error(`${key} is not an object`);
+      this.#claim(root, key);
+      const values: Record<string, unknown> = {};
+      root[key] = values;
+      this.#frames.push({
+        kind: "section",
+        name: key,
+        fields: section,
+        values,
+      });
+    } else if (this.document.header.has(key))
+      throw new Error(`${this.label} ${key} is not a scalar`);
+    else this.#skipping = 1;
+  }
+
   #open(kind: "object" | "array"): void {
     const frame = this.#frames.at(-1);
     const key = this.#key;
@@ -354,29 +403,9 @@ export abstract class KunaJsonDocumentReader extends Writable {
       return;
     }
     switch (frame.kind) {
-      case "root": {
-        const rows = this.document.rows.get(key!);
-        const section = this.document.sections.get(key!);
-        if (rows !== undefined) {
-          if (kind !== "array" || this.#rowsSeen.has(key!))
-            throw new Error(`${this.label} rows ${key!} are not one array`);
-          this.#frames.push({ kind: "rows", name: key!, spec: rows });
-        } else if (section !== undefined) {
-          if (kind !== "object") throw new Error(`${key!} is not an object`);
-          this.#claim(frame.values, key!);
-          const values: Record<string, unknown> = {};
-          frame.values[key!] = values;
-          this.#frames.push({
-            kind: "section",
-            name: key!,
-            fields: section,
-            values,
-          });
-        } else if (this.document.header.has(key!))
-          throw new Error(`${this.label} ${key!} is not a scalar`);
-        else this.#skipping = 1;
+      case "root":
+        this.#openMember(kind, key!, frame.values);
         return;
-      }
       case "rows":
         if (kind !== "object")
           throw new Error(`${frame.name} row is not an object`);
