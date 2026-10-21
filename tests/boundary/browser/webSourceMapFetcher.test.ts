@@ -1727,6 +1727,12 @@ describe("source-map original artifact language metadata", () => {
     ["main.js", "text/javascript"],
     ["main.mjs", "text/javascript"],
     ["main.cjs", "text/javascript"],
+    ["main.ts?revision=2", "text/typescript"],
+    ["main.tsx?revision=2", "text/typescript"],
+    ["main.mts?revision=2", "text/typescript"],
+    ["main.cts?revision=2", "text/typescript"],
+    ["main.js?revision=2", "text/javascript"],
+    ["extensionless?revision=2", "text/javascript"],
   ])("retains the source language for %s", async (filename, mediaType) => {
     const text =
       mediaType === "text/typescript"
