@@ -475,13 +475,16 @@ const parseFields = (block: string): ParsedFields => {
 };
 
 /** Names and linker options are text even when they look numeric. */
-const TEXT_FIELDS = /^(?:segname|sectname|string #\d+)$/u;
+const TEXT_FIELDS = /^(?:name|segname|sectname|string #\d+)$/u;
 
 const parseField = (rawLine: string): readonly [string, string] | undefined => {
   // otool prints each linker option as `string #n <option>`; keep the option
   // exactly, including surrounding spaces, under otool's ordinal label.
   const option = /^\s*(string #[1-9]\d*)(?: (.*))?$/u.exec(rawLine);
   if (option?.[1] !== undefined) return [option[1], option[2] ?? ""];
+  // Keep name payloads intact, including surrounding whitespace.
+  const name = /^\s*(name)(?: (.*))?$/u.exec(rawLine);
+  if (name?.[1] !== undefined) return [name[1], name[2] ?? ""];
   const line = rawLine.trim();
   // These are the compound field labels used by otool. Keeping this list
   // explicit prevents a one-word field value such as `sectname version` from
@@ -640,7 +643,7 @@ const hexField = (
 };
 
 const stripOffsetSuffix = (value: string | null): string =>
-  value?.replace(/\s+\(offset\s+\d+\)$/u, "") ?? "unknown";
+  value?.replace(/ \(offset\s+\d+\)$/u, "") ?? "unknown";
 
 const sectionAlignment = (raw: string | null): number | null => {
   if (raw === null) return null;

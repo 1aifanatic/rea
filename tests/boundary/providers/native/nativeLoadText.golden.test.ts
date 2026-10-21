@@ -35,3 +35,21 @@ it.each([
       .cmdsize,
   ).toBe(232);
 });
+
+it("preserves leading and trailing whitespace in dependency install names", async () => {
+  const output = (await nativeFixture("otool-load.txt")).replace(
+    "/usr/lib/libSystem.B.dylib",
+    "  leading.dylib  ",
+  );
+  const load = parseOtoolLoadCommands(output);
+  expect(
+    load.commands.find((command) => command.kind === "LC_LOAD_DYLIB")?.fields
+      .name,
+  ).toBe("  leading.dylib   (offset 24)");
+  expect(load.dependencies).toContainEqual(
+    expect.objectContaining({
+      path: "  leading.dylib  ",
+      kind: "LC_LOAD_DYLIB",
+    }),
+  );
+});
