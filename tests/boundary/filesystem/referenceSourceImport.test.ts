@@ -825,6 +825,54 @@ describe("reference source rooted module specifiers", () => {
       parse_state: "parsed",
     });
   });
+
+  it("retains static template CommonJS requires while distinguishing dynamic imports and ESM syntax errors", async () => {
+    const root = await createTestTempDirectory("rea-reference-template-req-");
+    await mkdir(join(root, "src"), { recursive: true });
+    await writeFile(
+      join(root, "src", "main.cjs"),
+      'const a = require(`mod`);\nconst b = require("mod-control");\nconst c = import(`dyn`);\nconst d = import(`dyn-${x}`);\n',
+    );
+    await writeFile(
+      join(root, "src", "invalid-esm.mjs"),
+      "import foo from `mod`;\n",
+    );
+    const result = await importTree(root);
+    if (!result.ok) throw result.error;
+    expect(result.value.relationships).toContainEqual({
+      from_path: "src/main.cjs",
+      to: "mod",
+      kind: "requires",
+      resolution: "external",
+      parse_state: "parsed",
+    });
+    expect(result.value.relationships).toContainEqual({
+      from_path: "src/main.cjs",
+      to: "mod-control",
+      kind: "requires",
+      resolution: "external",
+      parse_state: "parsed",
+    });
+    expect(result.value.relationships).toContainEqual({
+      from_path: "src/main.cjs",
+      to: "dyn",
+      kind: "imports",
+      resolution: "external",
+      parse_state: "parsed",
+    });
+    expect(result.value.relationships).toContainEqual({
+      from_path: "src/main.cjs",
+      to: "<dynamic-import>",
+      kind: "imports",
+      resolution: "unknown",
+      parse_state: "partial",
+    });
+    expect(
+      result.value.parse_failures.some(
+        (f) => f.path === "src/invalid-esm.mjs" && f.parser === "babel",
+      ),
+    ).toBe(true);
+  });
 });
 
 describe.skipIf(process.platform === "win32")(

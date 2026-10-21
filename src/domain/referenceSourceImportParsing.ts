@@ -4,6 +4,7 @@ import type {
   ImportExpression,
   Node,
   StringLiteral,
+  TemplateLiteral,
 } from "@babel/types";
 import { traverseJavaScriptAst } from "./javascript/javascriptSemanticTraversal.js";
 import {
@@ -22,6 +23,7 @@ import {
   isImportExpression,
   isMemberExpression,
   isStringLiteral,
+  isTemplateLiteral,
   isTSExternalModuleReference,
   isTSImportEqualsDeclaration,
   isTSModuleDeclaration,
@@ -68,6 +70,14 @@ export const PARSEABLE_REFERENCE_SOURCE_LANGUAGES: ReadonlySet<string> =
 
 const safeModuleName = (node: Node | null | undefined): string | undefined => {
   if (isStringLiteral(node)) return node.value;
+  if (
+    isTemplateLiteral(node) &&
+    node.expressions.length === 0 &&
+    node.quasis.length === 1
+  ) {
+    const cooked = node.quasis[0]?.value.cooked;
+    if (cooked !== null && cooked !== undefined) return cooked;
+  }
   return undefined;
 };
 
@@ -84,24 +94,28 @@ const resolveSpecifier = (
 
 const isModuleExpression = (
   expression: Node | null | undefined,
-): expression is StringLiteral | CallExpression =>
-  isStringLiteral(expression) || isCallExpression(expression);
+): expression is StringLiteral | TemplateLiteral | CallExpression =>
+  isStringLiteral(expression) ||
+  isTemplateLiteral(expression) ||
+  isCallExpression(expression);
 
 const moduleSpecifierFromExpression = (
   expression: Node | null | undefined,
 ):
   | { specifier: string; parseState: ReferenceSourceImportParseState }
   | undefined => {
-  if (isStringLiteral(expression))
-    return { specifier: expression.value, parseState: "parsed" };
+  const literal = safeModuleName(expression);
+  if (literal !== undefined)
+    return { specifier: literal, parseState: "parsed" };
   if (
     isCallExpression(expression) &&
     isImport(expression.callee) &&
     expression.arguments.length > 0
   ) {
     const first = expression.arguments[0];
-    if (isStringLiteral(first)) {
-      return { specifier: first.value, parseState: "parsed" };
+    const firstLiteral = safeModuleName(first);
+    if (firstLiteral !== undefined) {
+      return { specifier: firstLiteral, parseState: "parsed" };
     }
     return { specifier: "<dynamic-import>", parseState: "partial" };
   }
