@@ -166,6 +166,47 @@ describe("source-map artifact relationships", () => {
     });
     expect(limitations).toEqual([]);
   });
+
+  it("keeps a source map contained by its archive when its target path is a directory", () => {
+    const archive = createOccurrence(entry("app", "directory"), "app", null);
+    archive.artifact_id = contentId("1");
+    const directoryTarget = createOccurrence(
+      entry("app/main.js", "directory"),
+      "app/main.js",
+      archive.occurrence_id,
+    );
+    directoryTarget.artifact_id = contentId("2");
+    const sourceMap = createOccurrence(
+      entry("app/main.js.map", "file"),
+      "app/main.js.map",
+      archive.occurrence_id,
+    );
+    sourceMap.artifact_id = contentId("3");
+
+    const { edges, limitations } = createArtifactEdges(contentId("4"), [
+      archive,
+      directoryTarget,
+      sourceMap,
+    ]);
+
+    expect(
+      edges.find(
+        ({ occurrence_id }) => occurrence_id === sourceMap.occurrence_id,
+      ),
+    ).toMatchObject({
+      relation: "contains",
+      parent_artifact_id: contentId("1"),
+    });
+    expect(
+      edges.find(
+        ({ occurrence_id }) => occurrence_id === directoryTarget.occurrence_id,
+      ),
+    ).toMatchObject({
+      relation: "contains",
+      parent_artifact_id: contentId("1"),
+    });
+    expect(limitations).toEqual([]);
+  });
 });
 
 const fat = (wide = false): Buffer =>
