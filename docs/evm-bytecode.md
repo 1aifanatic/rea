@@ -115,7 +115,10 @@ address space differs from resident memory. The worker retains inherited tighter
 soft/hard limits, reports its configured soft limits inline and leaves hard limits
 unchanged. WASM trap reservations are disabled
 so the engine can run within that virtual limit; actual memory is not equated to
-its 3 GiB allowance. Limits fail without partial success. Stable snapshots,
+its 3 GiB allowance. Limits fail without partial success. A carrier above the
+input allowance is a non-retryable `resource_constraint` with
+`resource: "file-size"` and `reported_limits.maximum_input_bytes`, not an
+input-schema correction. Stable snapshots,
 private files and owned processes are cleaned independently of caller cancellation.
 Invalid-input, unsupported, cancellation, timeout and malformed-reply failures
 retain bounded stdout/stderr under `details.captured_output`, including whether

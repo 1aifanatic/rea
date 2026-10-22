@@ -173,28 +173,38 @@ export const evmInterfaceFailure = (
       );
     if (
       phase === "artifact-read" &&
-      ["limit", "path", "format"].includes(cause.reason)
+      cause.reason === "limit" &&
+      cause.boundary === "file-size"
     ) {
-      const inputLimited = cause.reason === "limit";
-      const message = inputLimited
-        ? `${cause.message} The input allowance is ${String(EVM_INTERFACE_LIMITS.inputBytes)} bytes. This release has no runtime override. timeout_ms does not raise it.`
-        : cause.message;
-      return new AnalysisInputError(
+      const message = `${cause.message} The input allowance is ${String(EVM_INTERFACE_LIMITS.inputBytes)} bytes. This release has no runtime override. timeout_ms does not raise it.`;
+      return new AnalysisResourceConstraintError(
         "inspect_evm_interface",
+        "file-size",
+        message,
+        { maximum_input_bytes: EVM_INTERFACE_LIMITS.inputBytes },
         {
           cause,
           ...cleanupOptions,
-          ...(inputLimited ? { userMessage: message } : {}),
+          retryable: false,
+          remediationAction: `Select a suitable complete bytecode carrier within the reported ${String(EVM_INTERFACE_LIMITS.inputBytes)}-byte input allowance. This release has no runtime override, and timeout_ms does not raise it. Do not truncate required bytes; repeating the unchanged oversized input fails the same way.`,
         },
+      );
+    }
+    if (
+      phase === "artifact-read" &&
+      (cause.reason === "path" || cause.reason === "format")
+    )
+      return new AnalysisInputError(
+        "inspect_evm_interface",
+        { cause, ...cleanupOptions },
         [
           {
             path: ["path"],
-            reason: inputLimited ? "out_of_range" : "invalid_format",
-            message,
+            reason: "invalid_format",
+            message: cause.message,
           },
         ],
       );
-    }
   }
   if (phase === "artifact-read" && cause instanceof Error && "code" in cause) {
     if (cause.code === "EACCES" || cause.code === "EPERM")

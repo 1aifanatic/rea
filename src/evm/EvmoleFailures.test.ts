@@ -1,5 +1,10 @@
+import { truncate, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, it } from "vitest";
+import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
+import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import { evmInterfaceFailure } from "./EvmoleFailures.js";
+import { EVM_INTERFACE_LIMITS } from "./EvmoleRelease.js";
 import { OwnedCommandFailure } from "../process/OwnedCommand.js";
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
@@ -131,4 +136,41 @@ it.each([
     expect(result.cleanupIncomplete).toBe(true);
     expect(result.cleanupResources).toEqual(["exact-owner"]);
   }
+});
+
+it("reports the fixed carrier input allowance as a file-size resource constraint", async () => {
+  const root = await createTestTempDirectory("rea-evm-input-allowance-");
+  const refusal = async (path: string) => {
+    try {
+      await readStableArtifact(path, EVM_INTERFACE_LIMITS.inputBytes);
+    } catch (cause: unknown) {
+      return projectAnalysisError(
+        evmInterfaceFailure(cause, "artifact-read", path),
+      );
+    }
+    throw new Error("Expected the carrier read to be refused");
+  };
+  const oversized = join(root, "selected.bin");
+  await writeFile(oversized, "");
+  await truncate(oversized, EVM_INTERFACE_LIMITS.inputBytes + 1);
+  const projected = await refusal(oversized);
+  expect(projected).toMatchObject({
+    code: "resource_constraint",
+    category: "resource_constraint",
+    retryable: false,
+    details: {
+      resource: "file-size",
+      reported_limits: { maximum_input_bytes: 4_194_304 },
+    },
+    remediation: {
+      action: expect.stringContaining("4194304-byte input allowance"),
+    },
+  });
+  expect(projected.recovery?.kind).not.toBe("inspect_input_contract");
+  expect(projected.details).not.toHaveProperty("issues");
+  // A directory remains an input correction, not a resource constraint.
+  expect(await refusal(root)).toMatchObject({
+    code: "invalid_request",
+    details: { issues: [{ path: ["path"], reason: "invalid_format" }] },
+  });
 });
