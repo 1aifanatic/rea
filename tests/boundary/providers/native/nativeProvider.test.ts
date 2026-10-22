@@ -1880,3 +1880,30 @@ it("reports the selected command deadline when preparation times out", async () 
     await client.close();
   }
 });
+
+it.each(["list_architectures", "inspect_macho"] as const)(
+  "reports unparseable lipo output from %s as unreadable output",
+  async (operation) => {
+    const client = new NativeMacOSProvider(
+      {},
+      new FixtureRunner({
+        lipo: "Fat header in: /private/fixture\nfat_magic 0xcafebabe\nnfat_arch 2\n",
+      }),
+      "darwin",
+    ).createClient(machoTarget("/private/fixture"));
+    try {
+      const result = await client.execute(operation, {});
+      if (result.ok) throw new Error("Expected unparseable lipo output");
+      expect(projectAnalysisError(result.error)).toMatchObject({
+        code: "unreadable_output",
+        details: {
+          operation,
+          reason:
+            "lipo -detailed_info output contained no architecture records",
+        },
+      });
+    } finally {
+      await client.close();
+    }
+  },
+);

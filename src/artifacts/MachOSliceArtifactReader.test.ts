@@ -8,6 +8,10 @@ import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 import { CPU, fatImage, machoImage } from "./apple/MachoImage.fixture.js";
 import { MachOSliceArtifactReader } from "./MachOSliceArtifactReader.js";
+import { ArtifactReaderFailure } from "./ArtifactReader.js";
+import { translateArtifactFailure } from "./ArtifactOperationFailure.js";
+import { LipoOutputFormatError } from "../native/parsers/lipo.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { err, ok } from "../domain/result.js";
 import { openRegularFile } from "../filesystem/RegularFile.js";
 import { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
@@ -388,4 +392,64 @@ describe("universal slices outside the structural index", () => {
       ).rejects.toMatchObject({ reason: "integrity" });
     },
   );
+});
+
+it("types unparseable lipo slice output as a format failure", async () => {
+  const root = await createTestTempDirectory("rea-slices-lipo-format-");
+  const binary = join(root, "fat");
+  const slices = [
+    {
+      name: "x86_64",
+      cpu: CPU.x86_64,
+      bytes: machoImage({ cpu: CPU.x86_64 }),
+    },
+    { name: "arm64", cpu: CPU.arm64, bytes: machoImage({ cpu: CPU.arm64 }) },
+  ];
+  await writeFile(binary, fatImage(slices));
+  const reader = new MachOSliceArtifactReader(
+    binary,
+    {},
+    {
+      run: () =>
+        Promise.resolve(
+          ok({
+            tool: "lipo",
+            executable: "/usr/bin/lipo",
+            executableSha256: "1".repeat(64),
+            toolVersion: null,
+            versionReason: "fixture",
+            arguments: ["-detailed_info", binary],
+            stdout: `Fat header in: ${binary}\nfat_magic 0xcafebabe\nnfat_arch 2\n`,
+            stderr: "",
+            stdoutBytes: 1,
+            stderrBytes: 0,
+            exitCode: 0,
+            signal: null,
+          }),
+        ),
+    },
+  );
+  onTestFinished(() => reader.close());
+  const failure: unknown = await (async () => {
+    for await (const _entry of reader.entries()) void _entry;
+  })().catch((cause: unknown) => cause);
+  expect(failure).toBeInstanceOf(ArtifactReaderFailure);
+  expect(failure).toMatchObject({
+    reason: "format",
+    message:
+      "lipo slice inventory could not be parsed: lipo -detailed_info output contained no architecture records",
+  });
+  expect((failure as Error).cause).toBeInstanceOf(LipoOutputFormatError);
+  // The shared translation keeps the producer diagnostic; it is not file access.
+  expect(
+    projectAnalysisError(
+      translateArtifactFailure("inventory_artifact", failure),
+    ),
+  ).toMatchObject({
+    details: {
+      reason: "format",
+      detail:
+        "lipo slice inventory could not be parsed: lipo -detailed_info output contained no architecture records",
+    },
+  });
 });

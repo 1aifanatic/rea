@@ -9,6 +9,7 @@ import {
   type NativeCommandRunner,
 } from "../native/CommandRunner.js";
 import {
+  LipoOutputFormatError,
   parseLipoOutput,
   type LipoArchitecture,
 } from "../native/parsers/lipo.js";
@@ -115,7 +116,10 @@ export class MachOSliceArtifactReader implements ArtifactReader {
     };
     await this.#verifySource(source);
     const fileSize = source.initial.size;
-    const { architectures } = parseLipoOutput(captured.value.stdout, this.path);
+    const { architectures } = parseSliceInventory(
+      captured.value.stdout,
+      this.path,
+    );
     const structural = await readStructuralSlices(source.handle, fileSize);
     await this.#verifySource(source);
     if (structural.status === "malformed")
@@ -495,6 +499,24 @@ export class MachOSliceArtifactReader implements ArtifactReader {
       );
   }
 }
+
+/** Unparseable lipo stdout is a producer format failure, not artifact access. */
+const parseSliceInventory = (
+  stdout: string,
+  path: string,
+): ReturnType<typeof parseLipoOutput> => {
+  try {
+    return parseLipoOutput(stdout, path);
+  } catch (cause: unknown) {
+    if (cause instanceof LipoOutputFormatError)
+      throw new ArtifactReaderFailure(
+        "format",
+        `lipo slice inventory could not be parsed: ${cause.message}`,
+        { cause },
+      );
+    throw cause;
+  }
+};
 
 /** Compare lipo's independent ranges with structurally parsed slice identity. */
 const readStructuralSlices = async (

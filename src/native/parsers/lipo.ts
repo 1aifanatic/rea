@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
 import { machoCpuSubtypeBase } from "../../domain/apple/machoCpuIdentity.js";
+import { err, ok, type Result } from "../../domain/result.js";
 
 const architectureSchema = z.object({
   name: z.string().min(1),
@@ -19,6 +21,11 @@ export type LipoArchitecture = z.infer<typeof architectureSchema>;
 interface LipoOutput {
   readonly format: "thin" | "fat";
   readonly architectures: LipoArchitecture[];
+}
+
+/** lipo stdout that describes no architecture; each consumer types it for its operation. */
+export class LipoOutputFormatError extends Error {
+  override readonly name = "LipoOutputFormatError";
 }
 
 /** Parse `lipo -detailed_info` framing and deterministic slice metadata. */
@@ -110,8 +117,25 @@ export const parseLipoOutput = (
   }
   flush();
   if (architectures.length === 0)
-    throw new TypeError("lipo output contained no architectures");
+    throw new LipoOutputFormatError(
+      "lipo -detailed_info output contained no architecture records",
+    );
   return { format: "fat", architectures };
+};
+
+/** Parse lipo stdout for a native operation; unparseable output is that operation's output failure. */
+export const parseLipoOutputFor = (
+  operation: string,
+  output: string,
+  operandPath: string,
+): Result<LipoOutput, AnalysisOutputError> => {
+  try {
+    return ok(parseLipoOutput(output, operandPath));
+  } catch (cause: unknown) {
+    if (cause instanceof LipoOutputFormatError)
+      return err(new AnalysisOutputError(operation, cause.message, { cause }));
+    throw cause;
+  }
 };
 
 const integer = (value: string | undefined): number | null => {
