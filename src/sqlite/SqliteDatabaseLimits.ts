@@ -13,6 +13,7 @@ export class SqliteInspectionFailure extends Error {
       | "selection"
       | "column-selection"
       | "column-evaluation"
+      | "column-limit"
       | "unsupported"
       | "unavailable"
       | "output-limit"
@@ -30,6 +31,16 @@ export class SqliteColumnEvaluationFailure extends SqliteInspectionFailure {
     readonly readableColumns: readonly string[],
   ) {
     super("column-evaluation", message);
+  }
+}
+/** A selection wider than the connection's result-column limit; the database stays readable. */
+export class SqliteColumnLimitFailure extends SqliteInspectionFailure {
+  constructor(
+    message: string,
+    /** The connection's SQLITE_LIMIT_COLUMN, counting repeated selections. */
+    readonly maximum: number,
+  ) {
+    super("column-limit", message);
   }
 }
 /** SQLite's primary result code for a native node:sqlite failure, if it carries one. */

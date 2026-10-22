@@ -794,6 +794,38 @@ it("attributes table and column selection failures to their own arguments", asyn
   expect(await projection({ table: "absent" })).toMatchObject({
     details: { issues: [{ path: ["table"] }] },
   });
+  // Node's bundled SQLite keeps the default SQLITE_LIMIT_COLUMN of 2000.
+  const wide = await projection({
+    table: "records",
+    columns: Array<string>(2001).fill("id"),
+  });
+  expect(wide).toMatchObject({
+    code: "invalid_request",
+    retryable: false,
+    details: {
+      issues: [
+        {
+          path: ["columns"],
+          reason: "out_of_range",
+          maximum: 2000,
+          message: expect.stringContaining(
+            "Selecting 2001 result columns exceeds this SQLite connection's 2000-column result limit",
+          ),
+        },
+      ],
+    },
+  });
+  expect(JSON.stringify(wide)).not.toContain("SQLite database is invalid");
+  const widest = await provider.inspect({
+    path: database.path,
+    table: "records",
+    columns: Array<string>(2000).fill("id"),
+    row_limit: 1,
+  });
+  if (!widest.ok) throw widest.error;
+  expect(widest.value.result).toMatchObject({
+    rows: { columns: Array<string>(2000).fill("id") },
+  });
   const selected = await provider.inspect({
     path: database.path,
     table: "records",

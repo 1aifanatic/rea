@@ -66,7 +66,11 @@ whose sampled values were read; stored and other generated cells stay readable. 
 cause a format refusal when all columns are requested. In inventory scope, an explicit valid subset can
 still be sampled without decoding unrelated malformed column names.
 Column selection requires a
-table and at least one name; empty-string identifiers are valid. `row_limit`
+table and at least one name; empty-string identifiers are valid. A selection
+wider than the connection's SQLite result-column limit (`SQLITE_LIMIT_COLUMN`,
+2000 in Node's bundled SQLite; repeated names count) is refused before any cell
+is evaluated, as an `out_of_range` issue on `columns` carrying that `maximum`;
+the database path is not reported as invalid. `row_limit`
 requires `table`, defaults to 20 and accepts positive safe integers. Samples
 remain subject to the byte and worker resource limits below, regardless of row count. The result reports
 the selected limit, returned count and whether more rows were observed. Row

@@ -11,6 +11,7 @@ import {
 import {
   SQLITE_DATABASE_LIMITS,
   SqliteColumnEvaluationFailure,
+  SqliteColumnLimitFailure,
   SqliteInspectionFailure,
   sqlitePrimaryResultCode,
 } from "./SqliteDatabaseLimits.js";
@@ -532,9 +533,10 @@ const readRows = (
   context: {
     readonly encoding: DatabaseEncoding;
     readonly budget: OutputBudget;
+    readonly columnLimit: number;
   },
 ): SqliteDatabase["rows"] => {
-  const { encoding, budget } = context;
+  const { encoding, budget, columnLimit } = context;
   if (input.table === undefined) return null;
   if (table === undefined) throw missingSelectedTable(input.table);
   if (table.kind === "unknown")
@@ -559,6 +561,12 @@ const readRows = (
         "column-selection",
         `Selected column does not exist with that exact name in table ${input.table}: ${name}`,
       );
+  // SQLite refuses a wider result before evaluating any cell; repeats count.
+  if (columns.length > columnLimit)
+    throw new SqliteColumnLimitFailure(
+      `Selecting ${String(columns.length)} result columns exceeds this SQLite connection's ${String(columnLimit)}-column result limit (SQLITE_LIMIT_COLUMN); repeated names count separately. The database remains readable: select at most ${String(columnLimit)} columns per request, removing duplicates or splitting the selection across requests.`,
+      columnLimit,
+    );
   const projection = columns
     .map((name) => {
       const column = quoteIdentifier(name);
@@ -632,6 +640,7 @@ export const inspectSqliteDatabaseSnapshot = (
       .object({
         length: z.int().positive().max(SQLITE_DATABASE_LIMITS.outputBytes),
         sqlLength: z.int().positive().max(SQLITE_DATABASE_LIMITS.outputBytes),
+        column: z.int().positive(),
       })
       .safeParse(limits);
     if (!supported.success)
@@ -666,7 +675,11 @@ export const inspectSqliteDatabaseSnapshot = (
       engine: { name: "SQLite", version },
       database_encoding: encoding,
       schema,
-      rows: readRows(db, input, selectedTable, { encoding, budget }),
+      rows: readRows(db, input, selectedTable, {
+        encoding,
+        budget,
+        columnLimit: supported.data.column,
+      }),
       limitations,
     };
   } finally {

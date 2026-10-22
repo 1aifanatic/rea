@@ -60,6 +60,12 @@ const replySchema = z.union([
     message: z.string(),
     readable_columns: z.array(z.string()),
   }),
+  z.strictObject({
+    ok: z.literal(false),
+    reason: z.literal("column-limit"),
+    message: z.string(),
+    maximum: z.int().positive(),
+  }),
 ]);
 /** Replaceable launcher retains the shared owned-process supervision boundary. */
 export type SqliteWorkerLauncher = NonNullable<
@@ -103,6 +109,15 @@ const rejectedReply = (
       },
     );
   }
+  if (reply.reason === "column-limit")
+    return new AnalysisInputError(operation, { capturedOutput }, [
+      {
+        path: ["columns"],
+        reason: "out_of_range",
+        maximum: reply.maximum,
+        message: reply.message,
+      },
+    ]);
   if (reply.reason === "memory")
     return new AnalysisResourceConstraintError(
       operation,
