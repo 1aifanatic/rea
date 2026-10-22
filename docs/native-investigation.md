@@ -407,6 +407,9 @@ complete observation.
   `Assets.car` metadata through macOS `assetutil --info`. Catalog digests, raw
   rendition fields, pagination and exact UI resource-name matches are returned.
   Image extraction and undocumented rendition interpretation are unsupported.
+  Each catalog's `assetutil` run has a fixed 60000 ms deadline, reported as
+  `provider_timeout`. Utility stdout that is not a JSON array of record objects
+  is `unreadable_output` with the parse reason, not a changed artifact.
 - `inspect_keyed_archive` / `rea inspect-keyed-archive <plist>` reads XML or
   binary Foundation keyed archives without instantiating classes. For an active
   app, provide its relative archive path as the second CLI argument or MCP

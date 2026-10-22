@@ -2,6 +2,8 @@ import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
   AnalysisInputError,
   AnalysisCancelledError,
+  AnalysisOutputError,
+  AnalysisTimeoutError,
   AnalysisUnsupportedTargetError,
 } from "../domain/analysisErrorCore.js";
 import { ArtifactOperationError } from "../domain/artifactOperationError.js";
@@ -43,11 +45,14 @@ export const translateArtifactFailure = (
     bindArtifactFileCleanup(cause, error);
     return error;
   }
-  // Caller-selection, target, unsupported-target and configuration failures are already typed;
-  // keep their correction details instead of reducing them to an I/O failure.
+  // Caller-selection, target, unsupported-target, configuration, producer-output and
+  // provider-deadline failures are already typed; keep their details instead of
+  // reducing them to an I/O failure.
   if (
     cause instanceof AnalysisInputError ||
     cause instanceof AnalysisCancelledError ||
+    cause instanceof AnalysisOutputError ||
+    cause instanceof AnalysisTimeoutError ||
     cause instanceof AnalysisUnsupportedTargetError ||
     cause instanceof BinaryTargetError ||
     cause instanceof ConfigurationError

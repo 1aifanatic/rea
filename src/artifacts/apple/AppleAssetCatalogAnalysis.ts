@@ -13,11 +13,18 @@ import {
   projectAppleAssetCatalogPage,
 } from "../../domain/apple/appleAssetCatalog.js";
 import {
+  AnalysisOutputError,
+  AnalysisTimeoutError,
+} from "../../domain/analysisErrorCore.js";
+import {
   ExecFileOutputCancelledError,
   execFileOutput,
 } from "../../process/ExecFileOutput.js";
 
+const OPERATION = "inspect_asset_catalog";
 const ASSETUTIL = "/usr/bin/assetutil";
+/** Fixed per-catalog assetutil deadline; this operation has no setting for it. */
+const ASSETUTIL_TIMEOUT_MS = 60_000;
 const MAX_CATALOG_BYTES = 64 * 1024 * 1024;
 const MAX_TOTAL_METADATA_BYTES = 64 * 1024 * 1024;
 
@@ -203,33 +210,42 @@ const inspectAssetCatalogEntry = async (input: {
       "integrity",
       `Asset catalog changed during inspection: ${entry.path}`,
     );
+  // The catalog bytes were re-verified above, so unparseable stdout is the
+  // utility's output, not a changed or invalid artifact.
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
   } catch (cause: unknown) {
-    throw new ArtifactReaderFailure(
-      "format",
-      `assetutil returned invalid JSON for ${entry.path}`,
-      { cause },
+    throw assetUtilOutputError(
+      entry.path,
+      `assetutil returned invalid JSON (${cause instanceof Error ? cause.message : String(cause)})`,
+      cause,
     );
   }
+  let records: ReturnType<typeof parseAppleAssetCatalogRecords>;
   try {
-    return {
-      catalog: {
-        path: entry.path,
-        sha256,
-        records: parseAppleAssetCatalogRecords(parsed),
-      },
-      metadataBytes: Buffer.byteLength(output, "utf8"),
-    };
+    records = parseAppleAssetCatalogRecords(parsed);
   } catch (cause: unknown) {
-    throw new ArtifactReaderFailure(
-      "format",
-      `assetutil returned an unsupported record for ${entry.path}`,
-      { cause },
-    );
+    if (cause instanceof AnalysisOutputError)
+      throw assetUtilOutputError(entry.path, cause.reason, cause);
+    throw cause;
   }
+  return {
+    catalog: { path: entry.path, sha256, records },
+    metadataBytes: Buffer.byteLength(output, "utf8"),
+  };
 };
+
+/** Name the catalog whose verified bytes produced unparseable assetutil output. */
+const assetUtilOutputError = (
+  catalogPath: string,
+  reason: string,
+  cause: unknown,
+): AnalysisOutputError =>
+  new AnalysisOutputError(OPERATION, `${reason} for ${catalogPath}`, {
+    cause,
+    remediationAction: `The catalog bytes were unchanged across inspection; ${ASSETUTIL} --info output for ${catalogPath} was not a JSON array of record objects. Check that utility's output on this host, for example after a macOS or Xcode update. Repeating the unchanged request with the same assetutil is expected to fail the same way.`,
+  });
 
 /** Return only explicit image or asset fields from decoded resource objects. */
 export const collectInterfaceBuilderResourceKeys = (
@@ -272,7 +288,7 @@ const runAssetUtil = async (
     return (
       await execFileOutput(ASSETUTIL, ["--info", path], {
         env: environment,
-        timeout: 60_000,
+        timeout: ASSETUTIL_TIMEOUT_MS,
         maxBuffer: MAX_CATALOG_BYTES,
         stopSignal: "SIGTERM",
         ...(signal === undefined ? {} : { signal }),
@@ -289,10 +305,16 @@ const runAssetUtil = async (
       typeof cause === "object" && cause !== null && "code" in cause
         ? cause.code
         : undefined;
+    if (code === "ETIMEDOUT")
+      throw new AnalysisTimeoutError(OPERATION, ASSETUTIL_TIMEOUT_MS, {
+        cause,
+        userMessage: `${ASSETUTIL} --info reached REA's fixed ${String(ASSETUTIL_TIMEOUT_MS)} ms per-catalog deadline for ${path}. This is a server/provider deadline, not the MCP client deadline.`,
+        remediationAction: `${OPERATION} has no setting for this ${String(ASSETUTIL_TIMEOUT_MS)} ms deadline, and this release has no runtime override. Check whether ${ASSETUTIL} --info completes promptly for this catalog on this host, then retry. The ${String(MAX_CATALOG_BYTES)}-byte catalog and output allowances are unchanged.`,
+      });
     throw new ArtifactReaderFailure(
       code === "ENOENT"
         ? "unavailable"
-        : code === "ETIMEDOUT" || code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+        : code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
           ? "limit"
           : "io",
       `assetutil failed${code === undefined ? "" : ` (${String(code)})`}`,
