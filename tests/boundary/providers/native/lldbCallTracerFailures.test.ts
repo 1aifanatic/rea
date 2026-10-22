@@ -433,6 +433,76 @@ describe("LLDB failure retention through the production tracer", () => {
   });
 });
 
+it("keeps each LLDB discovery failure class instead of reporting LLDB as missing", async () => {
+  const discover = async (failure: NativeCommandFailure) => {
+    const controller = new AbortController();
+    const tracer = new LldbCallTracer(
+      {},
+      () => Promise.reject(new Error("LLDB must not launch")),
+      async (_tool, signal) => {
+        expect(signal).toBe(controller.signal);
+        if (failure.reason === "cancelled")
+          controller.abort(failure.cancellation?.reason);
+        return err(failure);
+      },
+    );
+    const result = await tracer.trace(request, controller.signal);
+    if (result.ok) throw new Error("expected an LLDB discovery failure");
+    return result.error;
+  };
+  const physical = new Error("controlled resolver failure");
+  const timeout = await discover(
+    new NativeCommandFailure("lldb", "timeout", null, { cause: physical }),
+  );
+  expect(timeout).toBeInstanceOf(AnalysisTimeoutError);
+  const timeoutProjection = projectAnalysisError(timeout);
+  expect(timeoutProjection).toMatchObject({
+    code: "provider_timeout",
+    details: { timeout_ms: 60_000 },
+    recovery: { kind: "inspect_timeout_state" },
+    remediation: {
+      action: expect.stringContaining(
+        "observe_native_calls has no setting for this 60000 ms discovery deadline",
+      ),
+    },
+  });
+  expect(JSON.stringify(timeoutProjection)).not.toContain(
+    "native_command_timeout_ms",
+  );
+  const outputLimit = projectAnalysisError(
+    await discover(new NativeCommandFailure("lldb", "output-limit", null)),
+  );
+  expect(outputLimit).toMatchObject({
+    code: "resource_constraint",
+    retryable: false,
+  });
+  const io = await discover(
+    new NativeCommandFailure("lldb", "io", null, { cause: physical }),
+  );
+  expect(projectAnalysisError(io)).toMatchObject({
+    code: "execution_failure",
+    details: { diagnostics: { tool: "lldb", reason: "io" } },
+  });
+  expect(io.cause).toBeInstanceOf(NativeCommandFailure);
+  for (const projection of [timeoutProjection, outputLimit])
+    expect(projection.message).not.toContain("Command Line Tools");
+  const callerReason = { requested_by: "caller" };
+  const cancelled = await discover(
+    new NativeCommandFailure("lldb", "cancelled", null, {
+      cancellation: { reason: callerReason },
+    }),
+  );
+  expect(cancelled).toBeInstanceOf(AnalysisCancelledError);
+  expect(cancelled.cause).toBe(callerReason);
+  const nullReason = await discover(
+    new NativeCommandFailure("lldb", "cancelled", null, {
+      cancellation: { reason: null },
+    }),
+  );
+  expect(nullReason).toBeInstanceOf(AnalysisCancelledError);
+  expect(nullReason.cause).toBeNull();
+});
+
 describe("LLDB primary outcome during owned process cleanup", () => {
   it
     .skipIf(process.platform === "win32")

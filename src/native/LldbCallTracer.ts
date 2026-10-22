@@ -42,6 +42,11 @@ import {
 } from "../process/ProviderDeadline.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 import { resolveXcrunTool, type ResolvedTool } from "./CommandRunner.js";
+import {
+  NATIVE_COMMAND_FIXED_ALLOWANCES,
+  translateNativeCommandFailure,
+} from "./NativeCommandFailureTranslation.js";
+import { DEFAULT_NATIVE_COMMAND_TIMEOUT_MS } from "../domain/native/nativeDeadlines.js";
 import { projectPartialNativeCalls } from "./NativeCallObservation.js";
 import { LldbReadbackFiles } from "./LldbReadbackFiles.js";
 import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
@@ -66,6 +71,12 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
  */
 const DEADLINE_GRACE_MS = 60_000;
 const DIAGNOSTIC_BYTES = 16 * 1024;
+
+/** xcrun discovery uses the default native command deadline; this operation has no setting for it. */
+const LLDB_DISCOVERY_RECOVERY = {
+  userMessage: `LLDB discovery (xcrun --find lldb) reached REA's fixed ${String(DEFAULT_NATIVE_COMMAND_TIMEOUT_MS)} ms native command deadline before LLDB was launched. This is a server/provider deadline, not the MCP client deadline.`,
+  remediationAction: `observe_native_calls has no setting for this ${String(DEFAULT_NATIVE_COMMAND_TIMEOUT_MS)} ms discovery deadline, and this release has no runtime override. Check that xcrun --find lldb completes promptly on this host, for example after a pending Xcode license or developer-directory selection is resolved, then retry. ${NATIVE_COMMAND_FIXED_ALLOWANCES} Confirm outstanding work and cleanup before retrying.`,
+} as const;
 
 const lldbGraceRecovery = (
   durationMs: number,
@@ -221,14 +232,10 @@ export class LldbCallTracer implements NativeCallTracer {
     const lldb = await this.resolveTool("lldb", signal);
     if (!lldb.ok)
       return err(
-        lldb.error.reason === "cancelled"
-          ? new AnalysisCancelledError(OPERATION)
-          : new AnalysisCapabilityUnavailableError(
-              PROVIDER,
-              OPERATION,
-              LLDB_REQUIREMENT,
-              { userMessage: LLDB_REQUIREMENT },
-            ),
+        translateNativeCommandFailure(OPERATION, lldb.error, {
+          unavailableReason: LLDB_REQUIREMENT,
+          timeoutRecovery: LLDB_DISCOVERY_RECOVERY,
+        }),
       );
     const root = await PrivateRuntimeRoot.create({ prefix: "rea-lldb-" });
     const paths = lldbRuntimePaths(root.path);
